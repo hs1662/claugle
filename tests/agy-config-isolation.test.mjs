@@ -185,9 +185,11 @@ describe("agy runs in a home that carries only the login token", () => {
 		fs.writeFileSync(path.join(home, ".gemini", "config", "config.json"), "agy");
 		fs.mkdirSync(path.join(home, ".gemini", "brain", "b1"), { recursive: true });
 		fs.writeFileSync(path.join(home, ".gemini", "brain", "b1", "note"), "agy");
+		fs.mkdirSync(path.join(home, ".gemini", "cache"), { recursive: true });
+		fs.symlinkSync("../brain/b1/note", path.join(home, ".gemini", "cache", "latest"));
 
 		prepareAgyHome(data, real);
-		assert.deepEqual(linksIn(home), [TOKEN]);
+		assert.deepEqual(linksIn(home).sort(), [".gemini/cache/latest", TOKEN].sort(), "agy's own links below the mirrored levels stay");
 		assert.equal(fs.lstatSync(path.join(home, ".gemini", "antigravity-cli")).isDirectory(), true);
 		assert.equal(fs.readFileSync(path.join(home, TOKEN), "utf8"), "token");
 		for (const rel of AGY_GLOBAL_CUSTOMIZATIONS.filter((r) => r !== ".gemini/config/config.json")) assert.equal(fs.existsSync(path.join(home, rel)), false, rel);

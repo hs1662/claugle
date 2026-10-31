@@ -304,13 +304,20 @@ export function ensureOwnGitRepo(dir) {
 const AGY_HOME_LINKS = Object.freeze([".gemini/antigravity-cli/antigravity-oauth-token"]);
 const AGY_HOME_FILES = Object.freeze([".gemini/config/.migrated"]);
 
-function removeLinksExcept(dir, keep) {
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		const full = path.join(dir, entry.name);
-		if (entry.isSymbolicLink()) {
-			if (!keep.has(full)) fs.rmSync(full, { force: true });
-		} else if (entry.isDirectory()) {
-			removeLinksExcept(full, keep);
+// The old mirror linked entries only at these levels. Links agy makes deeper (its cli.log) stay, and
+// the cleanup does not grow with agy's conversation state.
+const AGY_HOME_MIRROR_DIRS = Object.freeze(["", ".gemini", ".gemini/config"]);
+
+function removeMirrorLinks(home) {
+	for (const rel of AGY_HOME_MIRROR_DIRS) {
+		let entries = [];
+		try {
+			entries = fs.readdirSync(path.join(home, rel), { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) fs.rmSync(path.join(home, rel, entry.name), { force: true });
 		}
 	}
 }
@@ -326,7 +333,7 @@ export function prepareAgyHome(pluginDataDir, realHome = os.homedir()) {
 			return false;
 		}
 	};
-	removeLinksExcept(home, new Set(links.filter(isLinked).map(({ link }) => link)));
+	removeMirrorLinks(home);
 	for (const { link, target } of links.filter((entry) => !isLinked(entry))) {
 		fs.mkdirSync(path.dirname(link), { recursive: true });
 		fs.rmSync(link, { recursive: true, force: true });
