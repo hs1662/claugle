@@ -1047,7 +1047,9 @@ export function parsePluginEnv(rawEnv = process.env) {
 	};
 }
 
-export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ".agents", ".claude", ".gemini", ".mcp.json"]);
+// agy's docs: workspace customizations live in `.agents/` (or `.agent/`, `_agents/`, `_agent/`).
+export const AGY_WORKSPACE_DIRS = Object.freeze([".agents", ".agent", "_agents", "_agent"]);
+export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ...AGY_WORKSPACE_DIRS, ".claude", ".gemini", ".mcp.json"]);
 
 const MAX_REQUEST_TASK_ID_LENGTH = 100;
 export function isSafeTaskId(taskId) {

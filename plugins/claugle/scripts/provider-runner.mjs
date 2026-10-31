@@ -911,7 +911,7 @@ export async function executeRoutedTask(params) {
 			readRoots: [projectDir],
 			writeRoots: lease ? [projectDir] : [],
 			denyReason: lease
-				? `claugle: only file reads and writes under ${projectDir} are allowed, never in .git, .claude, .agents, .gemini or .mcp.json. Use paths under ${projectDir}.`
+				? `claugle: only file reads and writes under ${projectDir} are allowed, never in ${HARNESS_CONFIG_NAMES.join(", ")}. Use paths under ${projectDir}.`
 				: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,
 		});
 		const agyAgent = writeAgyAgent(gateDir, lease ? "claugle-editor" : "claugle-reader", projectDir);
