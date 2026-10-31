@@ -336,7 +336,7 @@ const AGY_AGENT_PROFILES = Object.freeze({
 	"claugle-editor": {
 		tools: [...AGY_READ_TOOLS, "write_to_file", "replace_file_content", "multi_replace_file_content"],
 		instructions: (projectDir) =>
-			`The project folder is ${projectDir}. Read and edit files only there. You cannot run commands or use any other tool.`,
+			`The project folder is ${projectDir}. Read and edit files only there. Make the requested change directly: list folders only to find a file the request does not name, and do not reread a file you just wrote. You cannot run commands or use any other tool.`,
 	},
 });
 const AGY_AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
