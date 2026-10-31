@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,7 +185,7 @@ export const ANTHROPIC_BUILTIN_CATALOG = Object.freeze([
 	Object.freeze({
 		familyId: "default",
 		label: "Default (Anthropic 기본 권장)",
-		description: "Anthropic 기본 모델 · 계정 유형에 맞춰 자동 선택 · 5시간 한도 초과 시 Google AI 자동 폴백",
+		description: "Anthropic 기본 모델 · 계정 유형에 맞춰 자동 선택",
 		behavesAs: "claude-opus-5-5",
 		provider: "claude-native",
 		defaultEffort: "high",
@@ -678,6 +679,7 @@ export const DEFAULT_GOVERNOR_THRESHOLDS = Object.freeze({
 	conserveClaudeBand: Object.freeze({ enterAt: 0.70, exitBelow: 0.65 }),
 	overflowToAgyBand: Object.freeze({ enterAt: 0.90, exitBelow: 0.82 }),
 	agyExhaustedBand: Object.freeze({ enterAt: 0.95, exitBelow: 0.88 }),
+	exhaustionSignalWindowMs: 5 * 60 * 60 * 1000,
 	circuitBreakerCooldownMs: 5 * 60 * 1000,
 });
 
@@ -951,7 +953,7 @@ export function parseRelativeGlob(raw) {
 }
 
 function parsePositiveBudget(rawVal, fallback) {
-	if (rawVal === undefined || rawVal === null || rawVal === "") {
+	if (rawVal === undefined || rawVal === null || rawVal === "" || /^\$\{[^}]*\}$/.test(String(rawVal).trim())) {
 		return { kind: "ok", value: fallback };
 	}
 	const parsed = Number(rawVal);
@@ -1022,17 +1024,6 @@ export function parsePluginEnv(rawEnv = process.env) {
 	);
 	if (geminiCliBudget.kind === "error") return geminiCliBudget;
 
-	const rawModeInput =
-		rawEnv.CLAUDE_PLUGIN_OPTION_DEFAULT_AGY_MODE ?? rawEnv.CLAUGLE_DEFAULT_AGY_MODE ?? "accept-edits";
-	const rawDefaultMode = rawModeInput === "agent" ? "accept-edits" : rawModeInput;
-	if (!AGY_EXECUTION_MODES.includes(rawDefaultMode)) {
-		return {
-			kind: "error",
-			code: "INVALID_ENV",
-			message: `Invalid default agy mode "${rawDefaultMode}". Expected one of: ${AGY_EXECUTION_MODES.join(", ")}.`,
-		};
-	}
-
 	const rawSessionId = String(rawEnv.CLAUDE_SESSION_ID || "default-session").trim();
 	const sanitizedSessionId = rawSessionId.replace(/[^a-zA-Z0-9._-]/g, "_") || "default-session";
 
@@ -1050,11 +1041,21 @@ export function parsePluginEnv(rawEnv = process.env) {
 				"agy-gemini-pool": agyGeminiBudget.value,
 				"gemini-cli-pool": geminiCliBudget.value,
 			}),
-			defaultAgyMode: rawDefaultMode,
 			...(rawEnv.CLAUGLE_AGY_BIN ? { agyBinOverride: String(rawEnv.CLAUGLE_AGY_BIN) } : {}),
 			...(rawEnv.CLAUGLE_GEMINI_BIN ? { geminiBinOverride: String(rawEnv.CLAUGLE_GEMINI_BIN) } : {}),
 		}),
 	};
+}
+
+// Files and folders that configure Claude Code, agy or gemini. Writing them would change the harness
+// itself, so neither the agy tool gate nor the worktree harvest lets a delegated model touch them.
+export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ".agents", ".claude", ".gemini", ".mcp.json"]);
+
+// A task id names folders and branches under the plugin data dir, so it may not carry separators.
+// Callers get a shorter limit than the runner so its per-attempt suffixes still fit.
+const MAX_REQUEST_TASK_ID_LENGTH = 100;
+export function isSafeTaskId(taskId) {
+	return typeof taskId === "string" && /^task-[A-Za-z0-9_-]{1,120}$/.test(taskId);
 }
 
 export function parseTaskRequest(rawInput) {
@@ -1115,6 +1116,13 @@ export function parseTaskRequest(rawInput) {
 	if (cwdRes.kind === "error") {
 		return { kind: "error", code: "INVALID_REQUEST", message: `Invalid cwd: ${cwdRes.message}` };
 	}
+	let cwdIsFolder = false;
+	try {
+		cwdIsFolder = fs.statSync(cwdRes.value, { throwIfNoEntry: false })?.isDirectory() === true;
+	} catch {}
+	if (!cwdIsFolder) {
+		return { kind: "error", code: "INVALID_REQUEST", message: `Invalid cwd: ${cwdRes.value} is not an existing folder.` };
+	}
 
 	const contextFiles = [];
 	if (rawInput.contextFiles !== undefined) {
@@ -1125,15 +1133,27 @@ export function parseTaskRequest(rawInput) {
 			if (typeof item !== "string" || item.trim().length === 0 || item.includes("\0")) {
 				return { kind: "error", code: "INVALID_REQUEST", message: "Each contextFile must be a valid path string." };
 			}
-			contextFiles.push(item.trim());
+			const contextFile = item.trim();
+			const fromCwd = path.relative(cwdRes.value, path.resolve(cwdRes.value, contextFile));
+			if (path.isAbsolute(contextFile) || fromCwd === ".." || fromCwd.startsWith(`..${path.sep}`)) {
+				return {
+					kind: "error",
+					code: "INVALID_REQUEST",
+					message: `contextFile "${contextFile}" must be a path inside cwd, relative to it.`,
+				};
+			}
+			contextFiles.push(contextFile);
 		}
 	}
 
-	const allowFileEdits = Boolean(rawInput.allowFileEdits);
-	const rawGlobs =
-		Array.isArray(rawInput.allowedEditGlobs) && rawInput.allowedEditGlobs.length > 0
-			? rawInput.allowedEditGlobs
-			: ["**/*"];
+	if (rawInput.allowFileEdits != null && typeof rawInput.allowFileEdits !== "boolean") {
+		return { kind: "error", code: "INVALID_REQUEST", message: "allowFileEdits must be true or false." };
+	}
+	const allowFileEdits = rawInput.allowFileEdits === true;
+	if (rawInput.allowedEditGlobs != null && !Array.isArray(rawInput.allowedEditGlobs)) {
+		return { kind: "error", code: "INVALID_REQUEST", message: "allowedEditGlobs must be an array of relative globs." };
+	}
+	const rawGlobs = rawInput.allowedEditGlobs?.length > 0 ? rawInput.allowedEditGlobs : ["**/*"];
 
 	const parsedGlobs = [];
 	for (const g of rawGlobs) {
@@ -1153,10 +1173,14 @@ export function parseTaskRequest(rawInput) {
 		};
 	}
 
-	const taskId =
-		typeof rawInput.taskId === "string" && rawInput.taskId.startsWith("task-")
-			? rawInput.taskId
-			: createTaskExecutionId();
+	if (rawInput.taskId !== undefined && (!isSafeTaskId(rawInput.taskId) || rawInput.taskId.length > MAX_REQUEST_TASK_ID_LENGTH)) {
+		return {
+			kind: "error",
+			code: "INVALID_REQUEST",
+			message: "taskId must look like task-<letters, digits, '_' or '-'>.",
+		};
+	}
+	const taskId = rawInput.taskId ?? createTaskExecutionId();
 
 	return {
 		kind: "ok",
@@ -1185,7 +1209,21 @@ export function parseAgyOutputJson(rawStdout) {
 		return { kind: "error", code: "INVALID_PROVIDER_JSON", message: "Empty stdout from agy CLI." };
 	}
 
-	let candidateJson = rawStdout.trim();
+	const streamResult = rawStdout
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.startsWith("{") && line.includes('"event"'))
+		.map((line) => {
+			try {
+				return JSON.parse(line);
+			} catch {
+				return null;
+			}
+		})
+		.filter((event) => event && event.event === "result" && event.result && typeof event.result === "object")
+		.pop();
+
+	let candidateJson = streamResult ? JSON.stringify(streamResult.result) : rawStdout.trim();
 	if (!candidateJson.startsWith("{")) {
 		const braceIdx = candidateJson.indexOf("\n{");
 		if (braceIdx >= 0) {
@@ -1211,6 +1249,16 @@ export function parseAgyOutputJson(rawStdout) {
 
 	if (!parsed || typeof parsed !== "object") {
 		return { kind: "error", code: "INVALID_PROVIDER_JSON", message: "agy JSON output is not an object." };
+	}
+
+	const finishedReason = parsed.finished_reason ?? parsed.finishedReason;
+	if (typeof finishedReason === "string" && finishedReason.length > 0) {
+		return {
+			kind: "error",
+			code: "INCOMPLETE_AGY_TURN",
+			finishedReason,
+			message: `agy stopped before finishing its turn (finished_reason=${finishedReason}).`,
+		};
 	}
 
 	if (parsed.status === "ERROR" || (typeof parsed.error === "string" && parsed.error.trim().length > 0)) {
@@ -1496,6 +1544,13 @@ export function classifyTask(prompt, explicitTaskKind, allowFileEdits = false) {
 	});
 }
 
+// A provider limit (5-hour session or agy refresh window) lifts on its own, so an exhaustion
+// report only counts while it is younger than that window.
+export function isPoolRecentlyExhausted(poolMetrics, windowEnd, thresholds = DEFAULT_GOVERNOR_THRESHOLDS) {
+	const lastAt = poolMetrics?.lastRateLimitAt;
+	return typeof lastAt === "number" && windowEnd - lastAt < thresholds.exhaustionSignalWindowMs;
+}
+
 export function transitionQuotaState(
 	previousState,
 	metrics,
@@ -1503,17 +1558,18 @@ export function transitionQuotaState(
 ) {
 	const prev = ALL_QUOTA_STATES.includes(previousState) ? previousState : "NORMAL";
 	const pools = metrics?.pools ?? {};
+	const recentlyExhausted = (poolId) => isPoolRecentlyExhausted(pools[poolId], metrics.windowEnd, thresholds);
 
 	const claudeRatio = Number(pools["claude-code-native"]?.consumedRatio ?? 0);
-	const claudeRateLimitHits = Number(pools["claude-code-native"]?.rateLimitHitsInWindow ?? 0);
 	const agyClaudeRatio = Number(pools["agy-claude-pool"]?.consumedRatio ?? 0);
 	const agyGeminiRatio = Number(pools["agy-gemini-pool"]?.consumedRatio ?? 0);
 	const agyMaxRatio = Math.max(agyClaudeRatio, agyGeminiRatio);
 
 	const agyExhausted =
-		prev === "FALLBACK_GEMINI_CLI"
+		(recentlyExhausted("agy-claude-pool") && recentlyExhausted("agy-gemini-pool")) ||
+		(prev === "FALLBACK_GEMINI_CLI"
 			? agyMaxRatio >= thresholds.agyExhaustedBand.exitBelow
-			: agyMaxRatio >= thresholds.agyExhaustedBand.enterAt;
+			: agyMaxRatio >= thresholds.agyExhaustedBand.enterAt);
 
 	if (agyExhausted) {
 		return "FALLBACK_GEMINI_CLI";
@@ -1521,7 +1577,7 @@ export function transitionQuotaState(
 
 	const wasOverflowOrHigher = prev === "OVERFLOW_TO_AGY" || prev === "FALLBACK_GEMINI_CLI";
 	const inOverflow =
-		claudeRateLimitHits > 0 ||
+		recentlyExhausted("claude-code-native") ||
 		(wasOverflowOrHigher
 			? claudeRatio >= thresholds.overflowToAgyBand.exitBelow
 			: claudeRatio >= thresholds.overflowToAgyBand.enterAt);
@@ -1567,18 +1623,17 @@ function buildPreferredTarget(preferredModel, preferredEffort, allowFileEdits, a
 	return null;
 }
 
-function adaptTargetForRequest(target, request, requiresWrite) {
+function adaptTargetForRequest(target, request) {
 	const effort = request.preferredEffort ?? target.effort;
 	if (target.provider === "agy") {
-		const needsWorktree = Boolean(request.allowFileEdits || requiresWrite);
-		const isolation = needsWorktree
+		const isolation = request.allowFileEdits
 			? Object.freeze({
 					kind: "git-worktree",
 					applyStrategy: request.applyStrategy,
 					defaultAllowedGlobs: request.allowedEditGlobs,
 				})
 			: READ_ONLY_ISOLATION;
-		const agyMode = needsWorktree ? "accept-edits" : "plan";
+		const agyMode = request.allowFileEdits ? "accept-edits" : "plan";
 		return Object.freeze({
 			...target,
 			effort,
@@ -1629,7 +1684,7 @@ export function resolveRoutePlan({
 	}
 
 	for (const item of baseChain) {
-		rawChain.push(adaptTargetForRequest(item, request, classification.requiresWorkspaceWrite));
+		rawChain.push(adaptTargetForRequest(item, request));
 	}
 
 	const candidates = [];
@@ -1651,7 +1706,11 @@ export function resolveRoutePlan({
 			continue;
 		}
 		const poolMetrics = pools[target.quotaPool];
-		if (poolMetrics && Number(poolMetrics.consumedRatio) >= 1.0) {
+		if (
+			poolMetrics &&
+			(Number(poolMetrics.consumedRatio) >= 1.0 ||
+				(target.provider !== "claude-native" && isPoolRecentlyExhausted(poolMetrics, metrics.windowEnd)))
+		) {
 			skippedCandidates.push(Object.freeze({ target, skipReason: "POOL_EXHAUSTED" }));
 			continue;
 		}

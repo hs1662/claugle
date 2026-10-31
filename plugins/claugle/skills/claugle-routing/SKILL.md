@@ -13,6 +13,8 @@ Call the `claugle` stdio MCP tools directly instead of spawning a subagent whene
 3. For read-only code reviews, PR diffs, or security audits, call `claugle_review`.
 4. For `coding-trivial` tasks in `NORMAL` state, call `claugle_run`.
 5. When `QuotaState` is `CONSERVE_CLAUDE`, `OVERFLOW_TO_AGY`, or `FALLBACK_GEMINI_CLI`, call `claugle_run` for `coding-complex` and `architecture` tasks as well.
-6. To inspect 7-day token ratios or circuit-breaker status before a large run, call `claugle_quota`.
+6. `claugle_run` runs read-only unless you pass `allowFileEdits: true`. Pass it, with `allowedEditGlobs`, only when the task must change files.
+7. Pass `contextFiles` as paths relative to `cwd`. The tools reject absolute paths and paths outside `cwd`.
+8. To inspect 7-day token ratios or circuit-breaker status before a large run, call `claugle_quota`.
 
 See [`sketch.d.ts`](../../types/sketch.d.ts) for domain types, [`policy-engine.mjs`](../../scripts/policy-engine.mjs) for the 32-cell lookup table, and [`README.md`](../../README.md) for pool budgets and hysteresis thresholds.

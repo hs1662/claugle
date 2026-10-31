@@ -44,7 +44,7 @@ export const MCP_TOOL_DEFINITIONS = Object.freeze([
 				contextFiles: {
 					type: "array",
 					items: { type: "string" },
-					description: "Relative or absolute paths to include as context.",
+					description: "Paths inside cwd, relative to it, to include as context.",
 				},
 				allowFileEdits: {
 					type: "boolean",
@@ -97,7 +97,7 @@ export const MCP_TOOL_DEFINITIONS = Object.freeze([
 				contextFiles: {
 					type: "array",
 					items: { type: "string" },
-					description: "Relative or absolute paths to include as context.",
+					description: "Paths inside cwd, relative to it, to include as context.",
 				},
 				allowFileEdits: {
 					type: "boolean",
@@ -140,7 +140,7 @@ export const MCP_TOOL_DEFINITIONS = Object.freeze([
 				contextFiles: {
 					type: "array",
 					items: { type: "string" },
-					description: "Files to include in the review prompt.",
+					description: "Files inside cwd, relative to it, to include in the review prompt.",
 				},
 				cwd: {
 					type: "string",
@@ -219,7 +219,7 @@ async function callMcpTool(name, args = {}, rawEnv = process.env) {
 		preferredEffort: args.effort,
 		cwd: args.cwd || env.projectDir,
 		contextFiles: args.contextFiles,
-		allowFileEdits: name === "claugle_review" ? false : Boolean(args.allowFileEdits),
+		allowFileEdits: name === "claugle_review" ? false : args.allowFileEdits,
 		allowedEditGlobs: args.allowedEditGlobs,
 		applyStrategy: args.applyStrategy,
 	});
@@ -275,7 +275,7 @@ export async function handleMcpJsonRpcRequest(message, rawEnv = process.env) {
 
 	const { id, method, params } = message;
 
-	if (method === "notifications/initialized" || method === "notifications/cancelled") {
+	if (id === undefined) {
 		return null;
 	}
 

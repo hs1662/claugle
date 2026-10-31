@@ -4,10 +4,12 @@ argument-hint: "[--model <slug>] [--effort <level>] [--kind <task-kind>] [--allo
 allowed-tools: Bash, mcp__plugin_claugle_claugle__claugle_run
 ---
 
-Run `claugle.mjs` to execute the routed task:
+Run `claugle.mjs` to execute the routed task. Keep the arguments verbatim inside the quoted heredoc so the shell does not expand them:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" run "$ARGUMENTS"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" run --args-stdin <<'CLAUGLE_ARGS'
+$ARGUMENTS
+CLAUGLE_ARGS
 ```
 
 Report the outcome, modified files, and any preserved `claugle/task-*` branch.

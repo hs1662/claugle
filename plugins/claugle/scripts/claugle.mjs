@@ -6,9 +6,11 @@ import {
 	GATEWAY_TURN_JSON_SCHEMA,
 	buildGatewayPrompt,
 	ensureGatewayDaemon,
-	extractSlashCommandFastPath,
 	formatAnthropicJsonResponse,
+	isReplaceableLocalBaseUrl,
+	parseGatewayPort,
 	readConfiguredModelEffort,
+	readSettingsBaseUrl,
 	resolveGatewayCandidates,
 	startAnthropicGatewayServer,
 	syncClaudeModelPickerSettings,
@@ -102,7 +104,6 @@ export {
 	ensureGatewayDaemon,
 	evaluateHookEvent,
 	executeRoutedTask,
-	extractSlashCommandFastPath,
 	formatAnthropicJsonResponse,
 	globToRegExp,
 	handleMcpJsonRpcRequest,
@@ -135,68 +136,197 @@ export {
 	writeAnthropicSseResponse,
 };
 
-export function tokenizeShellArgs(rawArgString) {
-	if (typeof rawArgString !== "string") return [];
-	const tokens = [];
-	let current = "";
-	let quote = null;
-	let i = 0;
-
-	while (i < rawArgString.length) {
-		const ch = rawArgString[i];
-		if (quote) {
-			if (ch === "\\" && quote === '"' && i + 1 < rawArgString.length) {
-				current += rawArgString[i + 1];
-				i += 2;
-				continue;
-			}
-			if (ch === quote) {
-				quote = null;
-				i += 1;
-				continue;
-			}
-			current += ch;
+function findClosingQuote(text, openAt) {
+	const quote = text[openAt];
+	for (let i = openAt + 1; i < text.length; i += 1) {
+		if (quote === '"' && text[i] === "\\") {
 			i += 1;
 			continue;
 		}
-
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			i += 1;
-			continue;
+		if (text[i] === quote && (i + 1 === text.length || /\s/.test(text[i + 1]))) {
+			return i;
 		}
-
-		if (ch === "\\" && i + 1 < rawArgString.length) {
-			current += rawArgString[i + 1];
-			i += 2;
-			continue;
-		}
-
-		if (/\s/.test(ch)) {
-			if (current.length > 0) {
-				tokens.push(current);
-				current = "";
-			}
-			i += 1;
-			continue;
-		}
-
-		current += ch;
-		i += 1;
 	}
+	return -1;
+}
 
-	if (current.length > 0) {
-		tokens.push(current);
+// A quote opens a group only at the start of a word and only when it is closed at the end
+// of a word, so apostrophes in prose ("the user's parser") stay literal.
+function scanShellTokens(text) {
+	const tokens = [];
+	let i = 0;
+	while (i < text.length) {
+		if (/\s/.test(text[i])) {
+			i += 1;
+			continue;
+		}
+		const start = i;
+		let value = "";
+		let quoted = false;
+		while (i < text.length && !/\s/.test(text[i])) {
+			const ch = text[i];
+			const close = i === start && (ch === '"' || ch === "'") ? findClosingQuote(text, i) : -1;
+			if (close > i) {
+				const inner = text.slice(i + 1, close);
+				value += ch === '"' ? inner.replace(/\\(.)/gs, "$1") : inner;
+				quoted = true;
+				i = close + 1;
+			} else if (ch === "\\" && i + 1 < text.length) {
+				value += text[i + 1];
+				i += 2;
+			} else {
+				value += ch;
+				i += 1;
+			}
+		}
+		tokens.push({ value, start, end: i, index: tokens.length, quoted });
 	}
 	return tokens;
 }
 
-export function parseCliSubcommandArgs(rawArgs) {
-	const expanded =
-		rawArgs.length === 1 && rawArgs[0].includes(" ") && rawArgs[0].trim().startsWith("-")
-			? tokenizeShellArgs(rawArgs[0])
-			: rawArgs;
+export function tokenizeShellArgs(rawArgString) {
+	if (typeof rawArgString !== "string") return [];
+	return scanShellTokens(rawArgString).map((token) => token.value);
+}
 
+const VALUE_FLAGS = Object.freeze({
+	"--model": "preferredModel",
+	"-m": "preferredModel",
+	"--effort": "preferredEffort",
+	"-e": "preferredEffort",
+	"--kind": "explicitTaskKind",
+	"-k": "explicitTaskKind",
+	"--context": "contextFiles",
+	"-c": "contextFiles",
+	"--glob": "allowedEditGlobs",
+	"-g": "allowedEditGlobs",
+	"--cwd": "cwd",
+	"--tokens": "tokens",
+	"--pool": "pool",
+	"--port": "port",
+});
+const LIST_OPTIONS = new Set(["contextFiles", "allowedEditGlobs"]);
+const SWITCH_FLAGS = Object.freeze({
+	"--allow-edits": { allowFileEdits: true },
+	"--write": { allowFileEdits: true },
+	"--branch-only": { applyStrategy: "branch-only", allowFileEdits: true },
+	"--json": { jsonOutput: true },
+	"--daemon": { daemon: true },
+	"--args-stdin": { argsFromStdin: true },
+});
+
+function flagAt(tokens, i, longOnly) {
+	const token = tokens[i];
+	if (!token || token.quoted || (longOnly && !token.value.startsWith("--"))) return null;
+	if (Object.hasOwn(SWITCH_FLAGS, token.value)) {
+		return { width: 1, apply: (options) => Object.assign(options, SWITCH_FLAGS[token.value]) };
+	}
+	if (!Object.hasOwn(VALUE_FLAGS, token.value)) return null;
+	if (i + 1 >= tokens.length) return { width: 1, missingValueFor: token.value };
+	const key = VALUE_FLAGS[token.value];
+	const value = tokens[i + 1].value;
+	return {
+		width: 2,
+		apply: (options) => {
+			if (LIST_OPTIONS.has(key)) options[key].push(value);
+			else options[key] = value;
+		},
+	};
+}
+
+function parsesAsFlagRun(tokens, from) {
+	for (let i = from; i < tokens.length; ) {
+		const flag = flagAt(tokens, i, true);
+		if (!flag || flag.missingValueFor) return false;
+		i += flag.width;
+	}
+	return true;
+}
+
+// Free text from a slash command is prose, so only a leading run of flags (any form) and a
+// trailing run of long flags count as options; "git commit -m" in a sentence stays prose, and a
+// bare "--" ends option parsing wherever it appears.
+function extractEdgeFlags(tokens, options) {
+	let start = 0;
+	for (;;) {
+		if (tokens[start] && !tokens[start].quoted && tokens[start].value === "--") {
+			return tokens.slice(start + 1);
+		}
+		const flag = flagAt(tokens, start, false);
+		if (!flag) break;
+		if (flag.missingValueFor) throw new Error(`${flag.missingValueFor} needs a value.`);
+		flag.apply(options);
+		start += flag.width;
+	}
+	const terminator = tokens.findIndex((token, i) => i >= start && !token.quoted && token.value === "--");
+	if (terminator >= 0) {
+		const flagNearby = [...tokens.slice(start, terminator), ...tokens.slice(terminator + 1)].find((token) =>
+			flagAt([token, { value: "" }], 0, true)
+		);
+		if (flagNearby) {
+			throw new Error(
+				`"${flagNearby.value}" appears in text that also has a bare -- in the middle, so it is unclear whether it is an option. Put options before the text, or quote the word.`
+			);
+		}
+		return tokens.slice(start);
+	}
+	let end = tokens.length;
+	for (let k = start + 1; k < tokens.length; k += 1) {
+		if (parsesAsFlagRun(tokens, k)) {
+			end = k;
+			break;
+		}
+	}
+	for (let i = end; i < tokens.length; ) {
+		const flag = flagAt(tokens, i, true);
+		flag.apply(options);
+		i += flag.width;
+	}
+	return tokens.slice(start, end);
+}
+
+function extractFlags(tokens, options) {
+	const promptTokens = [];
+	for (let i = 0; i < tokens.length; i += 1) {
+		const flag = tokens[i].quoted ? undefined : tokens[i].value;
+		if (flag === "--") {
+			promptTokens.push(...tokens.slice(i + 1));
+			break;
+		}
+		if (Object.hasOwn(VALUE_FLAGS, flag)) {
+			if (i + 1 === tokens.length) {
+				throw new Error(`${flag} needs a value.`);
+			}
+			const key = VALUE_FLAGS[flag];
+			const value = tokens[i + 1].value;
+			if (LIST_OPTIONS.has(key)) options[key].push(value);
+			else options[key] = value;
+			i += 1;
+		} else if (Object.hasOwn(SWITCH_FLAGS, flag)) {
+			Object.assign(options, SWITCH_FLAGS[flag]);
+		} else {
+			promptTokens.push(tokens[i]);
+		}
+	}
+	return promptTokens;
+}
+
+// Rebuilds the prompt from the original text so quotes, newlines, and spacing survive.
+function spliceRawText(text, tokens) {
+	const runs = [];
+	for (const token of tokens) {
+		const last = runs.at(-1);
+		if (last && token.index === last.index + 1) {
+			last.end = token.end;
+			last.index = token.index;
+		} else {
+			runs.push({ start: token.start, end: token.end, index: token.index });
+		}
+	}
+	return runs.map((run) => text.slice(run.start, run.end)).join(" ");
+}
+
+export function parseCliSubcommandArgs(rawArgs, argsText) {
 	const options = {
 		contextFiles: [],
 		allowedEditGlobs: [],
@@ -204,88 +334,16 @@ export function parseCliSubcommandArgs(rawArgs) {
 		applyStrategy: "patch-if-clean",
 		jsonOutput: false,
 	};
-	const positional = [];
-
-	let i = 0;
-	while (i < expanded.length) {
-		const arg = expanded[i];
-		if (arg === "--model" || arg === "-m") {
-			options.preferredModel = expanded[i + 1];
-			i += 2;
-			continue;
-		}
-		if (arg === "--effort" || arg === "-e") {
-			options.preferredEffort = expanded[i + 1];
-			i += 2;
-			continue;
-		}
-		if (arg === "--kind" || arg === "-k") {
-			options.explicitTaskKind = expanded[i + 1];
-			i += 2;
-			continue;
-		}
-		if (arg === "--context" || arg === "-c") {
-			if (expanded[i + 1]) options.contextFiles.push(expanded[i + 1]);
-			i += 2;
-			continue;
-		}
-		if (arg === "--glob" || arg === "-g") {
-			if (expanded[i + 1]) options.allowedEditGlobs.push(expanded[i + 1]);
-			i += 2;
-			continue;
-		}
-		if (arg === "--allow-edits" || arg === "--write") {
-			options.allowFileEdits = true;
-			i += 1;
-			continue;
-		}
-		if (arg === "--branch-only") {
-			options.applyStrategy = "branch-only";
-			options.allowFileEdits = true;
-			i += 1;
-			continue;
-		}
-		if (arg === "--cwd") {
-			options.cwd = expanded[i + 1];
-			i += 2;
-			continue;
-		}
-		if (arg === "--tokens") {
-			options.tokens = Number(expanded[i + 1]);
-			i += 2;
-			continue;
-		}
-		if (arg === "--pool") {
-			options.pool = expanded[i + 1];
-			i += 2;
-			continue;
-		}
-		if (arg === "--json") {
-			options.jsonOutput = true;
-			i += 1;
-			continue;
-		}
-		if (arg === "--port") {
-			options.port = Number(expanded[i + 1]);
-			i += 2;
-			continue;
-		}
-		if (arg === "--daemon") {
-			options.daemon = true;
-			i += 1;
-			continue;
-		}
-		if (arg === "--") {
-			positional.push(...expanded.slice(i + 1));
-			break;
-		}
-		positional.push(arg);
-		i += 1;
+	const argvTokens = rawArgs.map((value, index) => ({ value, index, quoted: false }));
+	const promptParts = [extractFlags(argvTokens, options).map((token) => token.value).join(" ")];
+	if (options.argsFromStdin && typeof argsText === "string") {
+		const tokens = scanShellTokens(argsText);
+		promptParts.push(spliceRawText(argsText, extractEdgeFlags(tokens, options)));
 	}
 
 	return {
 		options,
-		prompt: positional.join(" ").trim(),
+		prompt: promptParts.filter(Boolean).join(" ").trim(),
 	};
 }
 
@@ -297,6 +355,21 @@ function readAllStdinSync() {
 		return "";
 	}
 }
+
+function hookEventName(stdinText) {
+	try {
+		return JSON.parse(stdinText)?.hook_event_name;
+	} catch {
+		return undefined;
+	}
+}
+
+const PROVIDER_BY_POOL = Object.freeze({
+	"claude-code-native": "claude-native",
+	"agy-claude-pool": "agy",
+	"agy-gemini-pool": "agy",
+	"gemini-cli-pool": "gemini-cli",
+});
 
 function renderEffortGauge(effort, supportedEfforts) {
 	if (supportedEfforts.length <= 1) {
@@ -313,8 +386,10 @@ function renderEffortGauge(effort, supportedEfforts) {
 
 export function runInteractiveModelPickerTui({
 	settingsPath,
+	gatewayUrl,
+	replaceLocalBaseUrl = false,
 } = {}) {
-	const initialSync = syncClaudeModelPickerSettings({ settingsPath });
+	const initialSync = syncClaudeModelPickerSettings({ settingsPath, gatewayUrl, replaceLocalBaseUrl });
 	const families = [...ANTHROPIC_BUILTIN_CATALOG, ...MODEL_FAMILY_CATALOG];
 	let selectedIdx = Math.max(
 		0,
@@ -376,6 +451,8 @@ export function runInteractiveModelPickerTui({
 					effortsByFamily[chosenFamily.familyId] || chosenFamily.defaultEffort;
 				const updated = syncClaudeModelPickerSettings({
 					settingsPath,
+					gatewayUrl,
+					replaceLocalBaseUrl,
 					selectedModel: chosenFamily.familyId,
 					selectedEffort: chosenEffort,
 				});
@@ -422,23 +499,32 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 
 	if (subcommand === "hook") {
 		const stdinText = readAllStdinSync();
-		if (
-			rawEnv.CLAUGLE_SKIP_GATEWAY_AUTOSTART !== "1" &&
-			(!stdinText || stdinText.includes("SessionStart"))
-		) {
-			syncClaudeModelPickerSettings({
-				settingsPath: rawEnv.CLAUGLE_CLAUDE_SETTINGS_PATH,
+		const warnings = [];
+		if (rawEnv.CLAUGLE_SKIP_GATEWAY_AUTOSTART !== "1" && hookEventName(stdinText) === "SessionStart") {
+			const port = parseGatewayPort(rawEnv.CLAUGLE_GATEWAY_PORT);
+			const settingsPath = rawEnv.CLAUGLE_CLAUDE_SETTINGS_PATH;
+			const synced = syncClaudeModelPickerSettings({
+				settingsPath,
+				gatewayUrl: `http://127.0.0.1:${port}`,
+				replaceLocalBaseUrl: await isReplaceableLocalBaseUrl(readSettingsBaseUrl(settingsPath)),
 			});
-			await ensureGatewayDaemon({
-				port: Number(rawEnv.CLAUGLE_GATEWAY_PORT) || DEFAULT_GATEWAY_PORT,
-				pluginRoot: rawEnv.CLAUDE_PLUGIN_ROOT,
-			});
+			if (synced.kind === "error") warnings.push(`[claugle] ${synced.message}`);
+			const daemon = await ensureGatewayDaemon({ port, pluginRoot: rawEnv.CLAUDE_PLUGIN_ROOT });
+			if (daemon.status === "stale-daemon" || daemon.status === "failed-to-start") {
+				warnings.push(
+					`[claugle] The gateway on port ${port} is ${daemon.status}. ${daemon.message ?? "Requests Claude Code sends to it will fail until it runs."}`
+				);
+			}
 		}
 		const hookOut = evaluateHookEvent({
 			hookStdinJson: stdinText,
 			env: rawEnv,
 		});
-		process.stdout.write(`${JSON.stringify(hookOut)}\n`);
+		const output =
+			warnings.length > 0
+				? { ...hookOut, systemMessage: [hookOut.systemMessage, ...warnings].filter(Boolean).join("\n") }
+				: hookOut;
+		process.stdout.write(`${JSON.stringify(output)}\n`);
 		return 0;
 	}
 
@@ -449,7 +535,12 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 	}
 	const env = envRes.value;
 
-	const { options, prompt } = parseCliSubcommandArgs(restArgs);
+	const { options, prompt } = parseCliSubcommandArgs(
+		restArgs,
+		restArgs.includes("--args-stdin") ? readAllStdinSync() : undefined
+	);
+
+	const configuredGatewayUrl = `http://127.0.0.1:${parseGatewayPort(rawEnv.CLAUGLE_GATEWAY_PORT)}`;
 
 	if (subcommand === "model" || subcommand === "models") {
 		const promptTokens = tokenizeShellArgs(prompt);
@@ -465,11 +556,15 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 		) {
 			return runInteractiveModelPickerTui({
 				settingsPath: rawEnv.CLAUGLE_CLAUDE_SETTINGS_PATH,
+				gatewayUrl: configuredGatewayUrl,
+				replaceLocalBaseUrl: await isReplaceableLocalBaseUrl(readSettingsBaseUrl(rawEnv.CLAUGLE_CLAUDE_SETTINGS_PATH)),
 			});
 		}
 
 		const synced = syncClaudeModelPickerSettings({
 			settingsPath: rawEnv.CLAUGLE_CLAUDE_SETTINGS_PATH,
+			gatewayUrl: configuredGatewayUrl,
+			replaceLocalBaseUrl: await isReplaceableLocalBaseUrl(readSettingsBaseUrl(rawEnv.CLAUGLE_CLAUDE_SETTINGS_PATH)),
 			selectedModel,
 			selectedEffort,
 		});
@@ -482,10 +577,11 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 	}
 
 	if (subcommand === "gateway") {
+		const requestedPort = Number(options.port);
 		const port =
-			Number.isFinite(options.port) && options.port > 0
-				? Math.floor(options.port)
-				: Number(rawEnv.CLAUGLE_GATEWAY_PORT) || DEFAULT_GATEWAY_PORT;
+			Number.isFinite(requestedPort) && requestedPort > 0
+				? Math.floor(requestedPort)
+				: parseGatewayPort(rawEnv.CLAUGLE_GATEWAY_PORT);
 		if (options.daemon) {
 			const status = await ensureGatewayDaemon({
 				port,
@@ -523,15 +619,24 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 	}
 
 	if (subcommand === "record-native") {
-		const totalTokens = Number.isFinite(options.tokens) && options.tokens > 0 ? Math.floor(options.tokens) : 0;
-		const pool = options.pool || "claude-code-native";
+		const pool = options.pool ?? "claude-code-native";
+		if (!Object.hasOwn(PROVIDER_BY_POOL, pool)) {
+			process.stderr.write(`[claugle] Unknown quota pool "${pool}". Expected one of: ${ALL_QUOTA_POOLS.join(", ")}.\n`);
+			return 1;
+		}
+		const tokensText = options.tokens ?? "0";
+		if (!/^\d+$/.test(tokensText)) {
+			process.stderr.write(`[claugle] --tokens expects a non-negative integer, got "${tokensText}".\n`);
+			return 1;
+		}
+		const totalTokens = Number(tokensText);
 		const appended = appendUsageEvent({
 			pluginDataDir: env.pluginDataDir,
 			event: {
 				sessionId: env.sessionId,
-				provider: pool === "claude-code-native" ? "claude-native" : "agy",
+				provider: PROVIDER_BY_POOL[pool],
 				quotaPool: pool,
-				modelSlug: options.preferredModel || "claude-host",
+				modelSlug: options.preferredModel,
 				taskKind: options.explicitTaskKind || "coding-complex",
 				inputTokens: totalTokens,
 				outputTokens: 0,
@@ -630,7 +735,13 @@ const isMainModule =
 	fs.realpathSync(fileURLToPath(import.meta.url)) === resolvedArgv1;
 
 if (isMainModule) {
-	runCli().then((code) => {
-		process.exitCode = code;
-	});
+	runCli().then(
+		(code) => {
+			process.exitCode = code;
+		},
+		(err) => {
+			process.stderr.write(`[claugle] ${err instanceof Error ? err.message : String(err)}\n`);
+			process.exitCode = 1;
+		}
+	);
 }

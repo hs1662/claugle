@@ -1,16 +1,25 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { createTaskExecutionId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
+import { HARNESS_CONFIG_NAMES, createTaskExecutionId, isSafeTaskId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
+// claugle's git plumbing never runs hooks or an fsmonitor command. With a relative core.hooksPath,
+// git would read hooks from files the model can rewrite inside the worktree, and a nested
+// repository's config could name an fsmonitor command that `git add` would run.
 function runGit(repoDir, args, options = {}) {
-	return execFileSync("git", ["-C", repoDir, ...args], {
+	return execFileSync("git", ["-C", repoDir, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args], {
 		encoding: options.encoding ?? "utf8",
 		input: options.input,
 		stdio: ["pipe", "pipe", "pipe"],
 	});
+}
+
+// The model can also rewrite the worktree's `.git` pointer file, so worktree commands name their
+// git dir and work tree instead of discovering them.
+function runWorktreeGit(lease, args, options) {
+	return runGit(lease.worktreePath, ["--git-dir", lease.gitDir, "--work-tree", lease.worktreePath, ...args], options);
 }
 
 function escapeRegexChar(ch) {
@@ -89,21 +98,20 @@ export function abortWorktreeLease(lease) {
 }
 
 export function acquireWorktreeLease(params) {
-	const taskId =
-		typeof params?.taskId === "string" && params.taskId.length > 0
-			? params.taskId
-			: createTaskExecutionId();
+	if (params?.taskId !== undefined && !isSafeTaskId(params.taskId)) {
+		throw new Error(`Unsafe worktree task id: ${JSON.stringify(params.taskId)}`);
+	}
+	const taskId = params?.taskId ?? createTaskExecutionId();
 
-	const hostRepoRes = parseAbsolutePath(params?.hostRepoRoot);
-	if (hostRepoRes.kind === "error") {
-		throw new Error(`Invalid hostRepoRoot: ${hostRepoRes.message}`);
+	const requestDirRes = parseAbsolutePath(params?.hostRepoRoot);
+	if (requestDirRes.kind === "error") {
+		throw new Error(`Invalid hostRepoRoot: ${requestDirRes.message}`);
 	}
 	const pluginDataRes = parseAbsolutePath(params?.pluginDataDir);
 	if (pluginDataRes.kind === "error") {
 		throw new Error(`Invalid pluginDataDir: ${pluginDataRes.message}`);
 	}
 
-	const hostRepoRoot = hostRepoRes.value;
 	const pluginDataDir = pluginDataRes.value;
 	const rawGlobs =
 		Array.isArray(params?.allowedGlobs) && params.allowedGlobs.length > 0
@@ -125,7 +133,15 @@ export function acquireWorktreeLease(params) {
 		? Math.floor(Number(params.nowMs))
 		: Date.now();
 
-	const baseCommitSha = runGit(hostRepoRoot, ["rev-parse", "HEAD"]).trim();
+	const requestDir = requestDirRes.value;
+	const hostRepoRoot = runGit(requestDir, ["rev-parse", "--show-toplevel"]).trim();
+	const cwdPrefix = runGit(requestDir, ["rev-parse", "--show-prefix"]).trim();
+	let baseCommitSha;
+	try {
+		baseCommitSha = runGit(hostRepoRoot, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
+	} catch {
+		throw new Error(`${hostRepoRoot} has no commits yet, so claugle cannot create an isolated worktree for edits.`);
+	}
 	const worktreesRoot = path.join(pluginDataDir, "worktrees");
 	fs.mkdirSync(worktreesRoot, { recursive: true });
 
@@ -135,13 +151,19 @@ export function acquireWorktreeLease(params) {
 	}
 
 	runGit(hostRepoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitSha]);
+	const gitDir = runGit(worktreePath, ["rev-parse", "--absolute-git-dir"]).trim();
+	const executionCwd = path.join(worktreePath, cwdPrefix);
+	fs.mkdirSync(executionCwd, { recursive: true });
 
 	const branchName = `claugle/${taskId.startsWith("task-") ? taskId : `task-${taskId}`}`;
 
 	return Object.freeze({
 		taskId,
 		hostRepoRoot,
+		cwdPrefix,
 		worktreePath,
+		gitDir,
+		executionCwd,
 		baseCommitSha,
 		branchName,
 		allowedGlobs: Object.freeze(allowedGlobs),
@@ -151,21 +173,36 @@ export function acquireWorktreeLease(params) {
 }
 
 function preserveWorktreeOnBranch(lease) {
-	try {
-		runGit(lease.worktreePath, ["diff", "--cached", "--quiet", "HEAD"]);
-	} catch {
-		runGit(lease.worktreePath, [
-			"-c",
-			"user.name=claugle",
-			"-c",
-			"user.email=claugle@localhost",
-			"commit",
-			"-m",
-			`chore(claugle): preserve changes for ${lease.taskId}`,
-			"--no-gpg-sign",
-		]);
+	runWorktreeGit(lease, [
+		"-c",
+		"user.name=claugle",
+		"-c",
+		"user.email=claugle@localhost",
+		"commit",
+		"-m",
+		`chore(claugle): preserve changes for ${lease.taskId}`,
+		"--no-gpg-sign",
+	]);
+	runWorktreeGit(lease, ["branch", "-f", lease.branchName, "HEAD"]);
+}
+
+// A `.git` below the worktree root is a repository the model created or rewrote. git would read
+// its config, so harvest stops before running any git command over it.
+function findNestedGitEntries(worktreePath) {
+	const found = [];
+	const pending = [worktreePath];
+	while (pending.length > 0) {
+		const dir = pending.pop();
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.name === ".git") {
+				if (dir !== worktreePath) found.push(path.relative(worktreePath, full));
+				continue;
+			}
+			if (entry.isDirectory()) pending.push(full);
+		}
 	}
-	runGit(lease.worktreePath, ["branch", "-f", lease.branchName, "HEAD"]);
+	return found.sort();
 }
 
 export function harvestAndReleaseWorktree(arg) {
@@ -175,19 +212,24 @@ export function harvestAndReleaseWorktree(arg) {
 	}
 
 	try {
-		runGit(lease.worktreePath, ["add", "-A"]);
+		const nestedGitPaths = findNestedGitEntries(lease.worktreePath);
+		if (nestedGitPaths.length > 0) {
+			forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
+			return Object.freeze({
+				kind: "rejected-nested-git",
+				nestedGitPaths: Object.freeze(nestedGitPaths),
+				worktreeCleanedUp: true,
+			});
+		}
 
-		const diffNamesRaw = runGit(lease.worktreePath, [
-			"diff",
-			"--cached",
-			"--name-only",
-			lease.baseCommitSha,
-		]);
+		runWorktreeGit(lease, ["add", "-A"]);
 
-		const modifiedFiles = diffNamesRaw
-			.split("\n")
-			.map((line) => line.trim())
-			.filter(Boolean);
+		// Plumbing output ignores user diff config and never quotes non-ASCII names. Paths are
+		// reported relative to the task cwd, so anything outside it starts with "../".
+		const modifiedFiles = runWorktreeGit(lease, ["diff-index", "--cached", "--name-only", "-z", lease.baseCommitSha])
+			.split("\0")
+			.filter(Boolean)
+			.map((file) => path.posix.relative(lease.cwdPrefix, file));
 
 		if (modifiedFiles.length === 0) {
 			forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
@@ -198,7 +240,7 @@ export function harvestAndReleaseWorktree(arg) {
 		}
 
 		const violatingFiles = modifiedFiles.filter(
-			(file) => !matchesAllowedGlobs(file, lease.allowedGlobs)
+			(file) => file.split("/").some((name) => HARNESS_CONFIG_NAMES.includes(name)) || !matchesAllowedGlobs(file, lease.allowedGlobs)
 		);
 
 		if (violatingFiles.length > 0) {
@@ -222,41 +264,29 @@ export function harvestAndReleaseWorktree(arg) {
 			});
 		}
 
-		const patchBuffer = runGit(
-			lease.worktreePath,
-			["diff", "--cached", "--binary", lease.baseCommitSha],
-			{ encoding: "buffer" }
-		);
+		const patchBuffer = runWorktreeGit(lease, ["diff-index", "--cached", "-p", "--binary", lease.baseCommitSha], {
+			encoding: "buffer",
+		});
 
-		let cleanCheckPassed = false;
+		// Without --index or --3way, git apply writes only the working tree, and it writes nothing
+		// unless every hunk applies.
 		try {
-			runGit(lease.hostRepoRoot, ["apply", "--check", "--3way", "--whitespace=nowarn"], {
-				input: patchBuffer,
-			});
-			cleanCheckPassed = true;
+			runGit(lease.hostRepoRoot, ["apply", "--whitespace=nowarn"], { input: patchBuffer });
 		} catch {
-			cleanCheckPassed = false;
-		}
-
-		if (cleanCheckPassed) {
-			runGit(lease.hostRepoRoot, ["apply", "--3way", "--whitespace=nowarn"], {
-				input: patchBuffer,
-			});
+			preserveWorktreeOnBranch(lease);
 			forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
 			return Object.freeze({
-				kind: "applied-to-host",
+				kind: "preserved-on-branch",
+				branchName: lease.branchName,
 				modifiedFiles: Object.freeze(modifiedFiles),
+				reason: "HOST_CONFLICT_ON_3WAY_APPLY",
 				worktreeCleanedUp: true,
 			});
 		}
-
-		preserveWorktreeOnBranch(lease);
 		forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
 		return Object.freeze({
-			kind: "preserved-on-branch",
-			branchName: lease.branchName,
+			kind: "applied-to-host",
 			modifiedFiles: Object.freeze(modifiedFiles),
-			reason: "HOST_CONFLICT_ON_3WAY_APPLY",
 			worktreeCleanedUp: true,
 		});
 	} catch (err) {

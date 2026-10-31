@@ -116,6 +116,7 @@ export interface GovernorThresholds {
 	readonly conserveClaudeBand: HysteresisBand;
 	readonly overflowToAgyBand: HysteresisBand;
 	readonly agyExhaustedBand: HysteresisBand;
+	readonly exhaustionSignalWindowMs: NonNegativeInt;
 	readonly circuitBreakerCooldownMs: NonNegativeInt;
 }
 
@@ -297,7 +298,6 @@ export interface PluginEnv {
 	readonly sessionId: SessionId;
 	readonly envFile?: AbsolutePath;
 	readonly weeklyBudgets: Readonly<Record<QuotaPoolId, NonNegativeInt>>;
-	readonly defaultAgyMode: AgyExecutionMode;
 	readonly agyBinOverride?: string;
 	readonly geminiBinOverride?: string;
 }
@@ -436,7 +436,6 @@ export declare function compactExpiredLedgerShards(params: {
 	readonly maxAgeMs?: number;
 }): {
 	readonly removedShards: readonly string[];
-	readonly compactedShards: readonly string[];
 	readonly retainedShards: readonly string[];
 };
 

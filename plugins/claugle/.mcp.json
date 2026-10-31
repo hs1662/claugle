@@ -7,7 +7,11 @@
 			],
 			"env": {
 				"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}",
-				"CLAUDE_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+				"CLAUDE_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}",
+				"CLAUDE_PLUGIN_OPTION_CLAUDE_WEEKLY_TOKEN_BUDGET": "${user_config.claude_weekly_token_budget}",
+				"CLAUDE_PLUGIN_OPTION_AGY_CLAUDE_WEEKLY_TOKEN_BUDGET": "${user_config.agy_claude_weekly_token_budget}",
+				"CLAUDE_PLUGIN_OPTION_AGY_GEMINI_WEEKLY_TOKEN_BUDGET": "${user_config.agy_gemini_weekly_token_budget}",
+				"CLAUDE_PLUGIN_OPTION_GEMINI_CLI_WEEKLY_TOKEN_BUDGET": "${user_config.gemini_cli_weekly_token_budget}"
 			}
 		}
 	}
