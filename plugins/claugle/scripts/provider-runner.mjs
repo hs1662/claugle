@@ -798,8 +798,9 @@ function formatPromptWithContextFiles(request) {
 // agy runs commands from a workspace's customization folders: hooks.json files (plugin hooks
 // included), MCP server configs, and plugins found in place or registered in plugins.json. The
 // PreToolUse gate never sees those commands, so agy must not start in a workspace that has any of them.
-function findAgyCommandCustomization(workspaceDir) {
-	let top = path.parse(path.resolve(workspaceDir)).root;
+function findAgyCommandCustomization(workspace) {
+	const workspaceDir = fs.realpathSync(workspace);
+	let top = path.parse(workspaceDir).root;
 	try {
 		top =
 			execFileSync("git", ["-C", workspaceDir, "rev-parse", "--show-toplevel"], {
@@ -828,7 +829,7 @@ function findAgyCommandCustomization(workspaceDir) {
 		}
 		return null;
 	};
-	for (let dir = path.resolve(workspaceDir); ; dir = path.dirname(dir)) {
+	for (let dir = workspaceDir; ; dir = path.dirname(dir)) {
 		for (const name of AGY_WORKSPACE_DIRS) {
 			const customDir = path.join(dir, name);
 			const found = fs.lstatSync(customDir, { throwIfNoEntry: false })?.isSymbolicLink() ? customDir : commandRunning(customDir);

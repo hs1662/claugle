@@ -100,6 +100,16 @@ describe("agy never starts where any agy customization folder would run commands
 		});
 	}
 
+	it("hands a read run back to the host when its cwd is a symlink into such a repo", async () => {
+		const repo = gitRepo({ ".agents/hooks.json": hook, "sub/a.txt": "x\n" });
+		const link = path.join(tmp("claugle-iso-link-"), "link");
+		fs.symlinkSync(path.join(repo, "sub"), link);
+		const agy = stubAgy(`reply("AGY_STARTED");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: link }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
+		assert.equal(agy.started(), false);
+	});
+
 	it("starts agy in a repo whose agy folders hold only rules and skills", async () => {
 		const repo = gitRepo({ ".agent/rules/style.md": "x\n", "_agents/skills/s/SKILL.md": "x\n" });
 		const agy = stubAgy(`reply("AGY_STARTED");`);

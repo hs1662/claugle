@@ -1114,11 +1114,13 @@ export function parseTaskRequest(rawInput) {
 	if (cwdRes.kind === "error") {
 		return { kind: "error", code: "INVALID_REQUEST", message: `Invalid cwd: ${cwdRes.message}` };
 	}
-	let cwdIsFolder = false;
+	// Every check below and agy itself must see the folder a symlinked cwd points to, or a walk up
+	// from the link's parents misses the real repo's agy customizations.
+	let cwd = null;
 	try {
-		cwdIsFolder = fs.statSync(cwdRes.value, { throwIfNoEntry: false })?.isDirectory() === true;
+		if (fs.statSync(cwdRes.value, { throwIfNoEntry: false })?.isDirectory()) cwd = fs.realpathSync(cwdRes.value);
 	} catch {}
-	if (!cwdIsFolder) {
+	if (!cwd) {
 		return { kind: "error", code: "INVALID_REQUEST", message: `Invalid cwd: ${cwdRes.value} is not an existing folder.` };
 	}
 
@@ -1132,7 +1134,7 @@ export function parseTaskRequest(rawInput) {
 				return { kind: "error", code: "INVALID_REQUEST", message: "Each contextFile must be a valid path string." };
 			}
 			const contextFile = item.trim();
-			const fromCwd = path.relative(cwdRes.value, path.resolve(cwdRes.value, contextFile));
+			const fromCwd = path.relative(cwd, path.resolve(cwd, contextFile));
 			if (path.isAbsolute(contextFile) || fromCwd === ".." || fromCwd.startsWith(`..${path.sep}`)) {
 				return {
 					kind: "error",
@@ -1188,7 +1190,7 @@ export function parseTaskRequest(rawInput) {
 			...(explicitTaskKind ? { explicitTaskKind } : {}),
 			...(preferredModel ? { preferredModel } : {}),
 			...(preferredEffort ? { preferredEffort } : {}),
-			cwd: cwdRes.value,
+			cwd,
 			contextFiles: Object.freeze(contextFiles),
 			allowFileEdits,
 			allowedEditGlobs: Object.freeze(parsedGlobs),
