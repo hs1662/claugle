@@ -155,7 +155,7 @@ export function acquireWorktreeLease(params) {
 	const executionCwd = path.join(worktreePath, cwdPrefix);
 	fs.mkdirSync(executionCwd, { recursive: true });
 
-	const branchName = `claugle/${taskId.startsWith("task-") ? taskId : `task-${taskId}`}`;
+	const branchName = `claugle/${taskId}`;
 
 	return Object.freeze({
 		taskId,
