@@ -1,18 +1,18 @@
 ---
 name: claugle-routing
-description: Internal routing policy reference for delegating tasks across Google AI subscription quota (agy and gemini CLI) based on task kind and rolling weekly quota state.
+description: Routing rules for delegating tasks across Google AI subscription pools (agy and gemini CLI) by task kind and 7-day rolling quota state.
 user-invocable: false
 ---
 
-# Claugle routing policy
+# Route tasks across Google AI quota pools
 
-`claugle` governs weekly token consumption across four quota pools (`claude-code-native`, `agy-claude-pool`, `agy-gemini-pool`, and `gemini-cli-pool`) using a four-state hysteresis state machine and a 32-cell `(QuotaState, TaskKind)` lookup matrix.
+Call the `claugle` stdio MCP tools directly instead of spawning a subagent whenever a task matches the rules below.
 
-## When to delegate via MCP tools
+1. For release notes, README updates, commit messages, PR descriptions, translations, or summaries, call `claugle_write`.
+2. If a writing task edits markdown or documentation files in place, set `allowFileEdits: true` and pass `allowedEditGlobs` to `claugle_write`.
+3. For read-only code reviews, PR diffs, or security audits, call `claugle_review`.
+4. For `coding-trivial` tasks in `NORMAL` state, call `claugle_run`.
+5. When `QuotaState` is `CONSERVE_CLAUDE`, `OVERFLOW_TO_AGY`, or `FALLBACK_GEMINI_CLI`, call `claugle_run` for `coding-complex` and `architecture` tasks as well.
+6. To inspect 7-day token ratios or circuit-breaker status before a large run, call `claugle_quota`.
 
-Prefer the `claugle` stdio MCP tools (`claugle_write`, `claugle_review`, `claugle_run`, `claugle_quota`) over spawning a subagent so the host Claude session avoids extra turn overhead:
-
-- Call `claugle_write` for release notes, README and documentation edits, commit messages, PR descriptions, translations, and text summaries.
-- Call `claugle_review` for read-only code reviews, PR audits, and security checks.
-- Call `claugle_run` for routine coding tasks (`coding-trivial`) in `NORMAL` state, and for complex coding or architecture tasks when `QuotaState` enters `CONSERVE_CLAUDE` or `OVERFLOW_TO_AGY`.
-- Call `claugle_quota` to inspect the 7-day rolling usage ratios and provider circuit-breaker health.
+See [`sketch.d.ts`](../../types/sketch.d.ts) for domain types, [`policy-engine.mjs`](../../scripts/policy-engine.mjs) for the 32-cell lookup table, and [`README.md`](../../README.md) for pool budgets and hysteresis thresholds.

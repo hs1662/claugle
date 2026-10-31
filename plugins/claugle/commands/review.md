@@ -4,10 +4,10 @@ argument-hint: "[--model <slug>] [--effort <level>] [--context <file>] <prompt>"
 allowed-tools: Bash, mcp__plugin_claugle_claugle__claugle_review
 ---
 
-Route the review request through `claugle` by running:
+Run `claugle.mjs` to route the read-only review request:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" review "$ARGUMENTS"
 ```
 
-Present the review findings directly to the user.
+Return the review findings verbatim to the user.

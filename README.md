@@ -1,31 +1,56 @@
-# claugle
+# claugle — Claude Code용 Google AI 구독 할당량 라우터 및 주간 한도 거버너
 
-`claugle` is a Claude Code plugin marketplace repository providing the `claugle` plugin. `claugle` integrates Google AI subscription model quota (`agy -p` and `gemini -p` headless CLIs) into Claude Code, automatically routing writing, documentation, translation, review, and overflow coding tasks across Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus 5.5, Claude Sonnet 5.5, and Gemini 2.5 models.
+> **English**: [`README.en.md`](README.en.md)
 
-## Quick start
+Claude Code를 주력 개발 도구로 쓰다 보면 릴리스 노트 작성이나 문서 번역, 일상적인 PR 코드 리뷰 같은 보조 작업이 주간 토큰 한도를 빠르게 갉아먹습니다. 정작 까다로운 아키텍처 설계나 다중 파일 디버깅에 들어가면 할당량이 바닥나곤 합니다. 반대로 Google AI 구독에 포함된 Antigravity CLI(`agy`)와 Gemini CLI(`gemini`)에는 Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus 5.5, Claude Sonnet 5.5의 주간 할당량이 넉넉히 들어 있는데도 개발 흐름이 끊긴다는 이유로 방치되곤 합니다. `claugle`은 이 두 구독 풀을 Claude Code 하네스 안에서 하나로 묶어 작업 성격과 잔여 한도에 맞춰 모델과 추론 강도를 자동 배정합니다.
 
-Install `claugle` in Claude Code directly from GitHub:
+비공개 OAuth 토큰을 뽑아내거나 내부 RPC를 가로채지 않고 공식 CLI만 호출합니다. 공식 문서에 명시된 헤드리스 CLI 계약(`agy -p --output-format json --disable-slash-commands` 및 `gemini -p --output-format json`)과 Claude Code 플러그인 표준 경계(`.mcp.json`, `hooks/hooks.json`, `agents/*.md`, `commands/*.md`, `skills/*/SKILL.md`)만 조합했기 때문에 업스트림 CLI 버전이 올라가도 깨지지 않습니다.
+
+## 설치
+
+Claude Code 대화창이나 터미널에서 GitHub 저장소 주소 한 줄만 등록하면 바로 설치됩니다. 모든 런타임 스크립트를 Node.js(`>=18.18`) 내장 모듈만으로 작성했으므로 별도의 `npm install`이나 빌드 과정은 전혀 필요하지 않습니다.
 
 ```bash
 claude plugin marketplace add https://github.com/hs1662/claugle.git
 claude plugin install claugle@claugle
 ```
 
-## Architecture highlights
+한 줄 명령으로 마켓플레이스 등록과 설치를 동시에 끝낼 수도 있습니다.
 
-- **Zero external dependencies.** Every runtime module under `plugins/claugle/scripts/` uses only built-in Node.js (`>=18.18`) modules so Claude Code marketplace caching works out of the box without `npm install`.
-- **32-cell policy matrix and hysteresis governor.** `plugins/claugle/scripts/policy-engine.mjs` maps all four `QuotaState` values (`NORMAL`, `CONSERVE_CLAUDE`, `OVERFLOW_TO_AGY`, `FALLBACK_GEMINI_CLI`) and eight `TaskKind` values (`writing`, `docs`, `translation`, `research`, `review`, `coding-trivial`, `coding-complex`, `architecture`) to non-empty ordered fallback chains.
-- **Lock-free per-process JSONL ledger shards.** `plugins/claugle/scripts/ledger-store.mjs` writes usage events to `${CLAUDE_PLUGIN_DATA}/ledger/shard-${sessionId}-${pid}.jsonl`, merges and deduplicates events over a 7-day rolling window at read time, and compacts shards older than 14 days on `SessionStart`.
-- **Task-scoped git worktree sandboxing.** `plugins/claugle/scripts/worktree-sandbox.mjs` isolates file-editing `agy -p` invocations in detached worktrees, validates modified paths against `allowedGlobs`, applies clean patches to the host repository with `git apply --3way`, and preserves conflicting edits on `claugle/task-<id>` branches without dirtying the host tree.
-- **Recursion guard encoded in structure.** `buildAgyCliArgs` always includes `--disable-slash-commands` and `CLAUGLE_HEADLESS_SUBPROCESS=1`.
+```bash
+claude plugin install claugle --marketplace https://github.com/hs1662/claugle.git
+```
 
-## Verification
+## 왜 claugle인가
 
-Run the test suite and strict Claude Code plugin validator:
+평소에는 호스트 Claude Code의 주간 토큰을 아껴 두고 한도가 차오르면 작업 흐름을 멈추지 않은 채 Google AI 구독 모델로 무게중심을 옮깁니다.
+
+1. **작업별 특화 분담**: 주간 한도가 여유로운 `NORMAL` 상태에서도 초안 집필(`writing`), 문서 갱신(`docs`), 다국어 번역(`translation`), 코드베이스 조사(`research`), 읽기 전용 코드 리뷰(`review`), 단순 수정(`coding-trivial`)은 Google AI의 `gemini-4-argon-high`, `gemini-3.8-flash-high`, `claude-sonnet-5-5-high`가 먼저 맡습니다. 호스트 Claude Code는 복잡한 구현(`coding-complex`)과 아키텍처 설계(`architecture`)에만 집중합니다.
+2. **4단계 히스테리시스 주간 한도 거버너**: 7일 롤링 윈도우 사용량을 추적해 `NORMAL` → `CONSERVE_CLAUDE`(호스트 한도 70% 진입, 65% 미만 복귀) → `OVERFLOW_TO_AGY`(90% 진입, 82% 미만 복귀) → `FALLBACK_GEMINI_CLI`(Antigravity 풀 95% 진입, 88% 미만 복귀) 네 단계로 전환합니다. 진입선과 복귀선에 간격을 두었기 때문에 경계선 근처에서 라우팅 경로가 매 요청마다 흔들리지 않습니다.
+3. **32-셀 결정적 정책 행렬**: 4개 할당량 상태와 8개 작업 유형을 조합한 32개 모든 칸에 1순위부터 3순위까지의 폴백 체인이 배열로 들어 있습니다. 1순위 모델이 429 한도 초과(`QUOTA_EXHAUSTED`)를 반환하거나 서킷 브레이커가 열려 있으면 즉시 다음 후보로 넘어갑니다.
+4. **격리된 Git 워크트리 샌드박스**: 외부 `agy -p` 프로세스에 파일 수정을 맡길 때는 호스트 작업 트리를 건드리지 않고 `${CLAUDE_PLUGIN_DATA}/worktrees/<taskId>`에 분리된 워크트리를 만듭니다. 작업이 끝나면 허용된 글로브 패턴(`allowedEditGlobs`) 안의 파일만 바꿨는지 검사한 뒤 `git apply --3way`로 깔끔하게 반영합니다. 만약 작업 중인 파일과 충돌하면 호스트 트리를 더럽히지 않고 `claugle/task-<id>` 브랜치에 커밋을 보존합니다.
+5. **무잠금 샤드 원장**: 여러 서브에이전트가 동시에 돌아도 락 경합이 생기지 않도록 프로세스마다 `shard-<sessionId>-<pid>.jsonl` 파일에 사용량 이벤트를 추가하고 읽을 때만 병합합니다. 세션 시작 시 14일이 지난 샤드와 2시간 이상 멈춰 있던 워크트리를 자동으로 정리합니다.
+
+## 주요 진입점
+
+작업 방식에 맞춰 세 가지 경로 중 편한 쪽을 골라 쓸 수 있습니다.
+
+| 호출 경로 | 이름 | 용도 |
+|---|---|---|
+| **Stdio MCP 도구** | `claugle_write` · `claugle_review` · `claugle_run` · `claugle_quota` | 서브에이전트 생성 오버헤드 없이 Claude가 직접 JSON-RPC 2.0으로 Google AI 모델을 호출 |
+| **슬래시 커맨드** | `/claugle:write` · `/claugle:review` · `/claugle:task` · `/claugle:quota` · `/claugle:explain` | 사용자가 명시적으로 특정 작업을 위임하거나 라우팅 계획 및 7일 사용량을 조회 |
+| **전달 서브에이전트** | `claugle:gemini-writer` · `claugle:agy-coder` · `claugle:agy-reviewer` | 호스트 세션이 저장소 파일을 미리 읽으며 토큰을 쓰지 않도록 `Bash` 한 줄로 작업을 즉시 전달 |
+
+## 저장소 구조 및 검증
+
+- [`plugins/claugle/`](plugins/claugle/README.md): 플러그인 매니페스트, 32-셀 정책 엔진, 무잠금 원장, 워크트리 샌드박스, MCP 서버, 훅, 서브에이전트, 슬래시 커맨드 본체
+- [`docs/architecture.md`](docs/architecture.md): 도메인 데이터 구조, 3개 설계 후보 교차 심판 및 합성 근거, 트레이드오프 기록
+- [`plugins/claugle/types/sketch.d.ts`](plugins/claugle/types/sketch.d.ts): 전체 모듈이 공유하는 TypeScript 도메인 타입 계약
+- [`tests/claugle.test.mjs`](tests/claugle.test.mjs): 정책 행렬, 히스테리시스 거버너, 원장 병합, 워크트리 격리, 실시간 MCP 서버를 검증하는 테스트 스위트
+
+로컬에서 테스트와 Claude Code 공식 플러그인 검증기를 실행하려면 아래 명령을 사용합니다.
 
 ```bash
 npm test
 npm run validate
 ```
-
-See [docs/architecture.md](docs/architecture.md) for the synthesis rationale and [plugins/claugle/types/sketch.d.ts](plugins/claugle/types/sketch.d.ts) for the TypeScript contract.

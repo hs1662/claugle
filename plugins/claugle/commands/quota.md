@@ -1,12 +1,12 @@
 ---
-description: Show 7-day rolling token usage across Claude Code, agy Claude, agy Gemini, and Gemini CLI pools plus current QuotaState.
+description: Show 7-day rolling token usage across all four quota pools and the current QuotaState.
 allowed-tools: Bash, mcp__plugin_claugle_claugle__claugle_quota
 ---
 
-Inspect the current `claugle` rolling quota snapshot and provider health by running:
+Run `claugle.mjs` to inspect the 7-day rolling quota snapshot and provider status:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" quota
 ```
 
-Summarize the current `QuotaState` and per-pool consumption ratios for the user.
+Report the active `QuotaState` and the consumption ratio for each quota pool.
