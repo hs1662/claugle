@@ -167,10 +167,11 @@ function isWithin(target, dir) {
 
 // Three layers bind a delegated run: the agent's tool list (writeAgyAgent), the PreToolUse gate
 // (writeAgyToolGate) and these deny rules. agy ignores `--mode plan` once slash commands are
-// disabled, and it accepts only the actions command, read_file, write_file, read_url, mcp,
-// execute_url and unsandboxed here; it logs and skips any other entry. `<action>(*)` matches every
-// target and a path rule matches everything under it.
-const AGY_ALWAYS_DENIED = Object.freeze(["command(*)", "mcp(*)", "read_url(*)", "execute_url(*)", "unsandboxed(*)"]);
+// disabled, and it honors only the actions command, read_file, write_file, read_url, mcp and
+// execute_url here; it logs and skips any other entry, unsandboxed included ("no longer a valid
+// rule, use command() instead"). `<action>(*)` matches every target and a path rule matches
+// everything under it.
+const AGY_ALWAYS_DENIED = Object.freeze(["command(*)", "mcp(*)", "read_url(*)", "execute_url(*)"]);
 
 // Headless agy refuses any write it would have to ask about, but it writes to the temp dir without
 // asking, and the host repo is the one place where a direct write would skip the glob check. A

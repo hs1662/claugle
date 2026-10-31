@@ -47,7 +47,7 @@ ${body}
 const envFor = (repo, agy) =>
 	parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("claugle-iso-data-"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
 
-const AGY_PERMISSION_ACTIONS = ["command", "read_file", "write_file", "read_url", "mcp", "execute_url", "unsandboxed"];
+const AGY_PERMISSION_ACTIONS = ["command", "read_file", "write_file", "read_url", "mcp", "execute_url"];
 
 describe("agy gets only deny rules it accepts", () => {
 	it("every deny entry names an action agy accepts, in plan and accept-edits modes", () => {
