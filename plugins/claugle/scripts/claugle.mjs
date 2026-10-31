@@ -394,9 +394,13 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 	return 1;
 }
 
+const resolvedArgv1 =
+	process.argv[1] && fs.existsSync(process.argv[1])
+		? fs.realpathSync(process.argv[1])
+		: process.argv[1];
 const isMainModule =
-	process.argv[1] &&
-	fileURLToPath(import.meta.url) === process.argv[1];
+	Boolean(resolvedArgv1) &&
+	fs.realpathSync(fileURLToPath(import.meta.url)) === resolvedArgv1;
 
 if (isMainModule) {
 	runCli().then((code) => {

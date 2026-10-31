@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import fs from "node:fs";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { loadRollingQuotaSnapshot } from "./ledger-store.mjs";
@@ -389,9 +390,13 @@ export function startMcpServer({
 	return rl;
 }
 
+const resolvedArgv1 =
+	process.argv[1] && fs.existsSync(process.argv[1])
+		? fs.realpathSync(process.argv[1])
+		: process.argv[1];
 const isMainModule =
-	process.argv[1] &&
-	fileURLToPath(import.meta.url) === process.argv[1];
+	Boolean(resolvedArgv1) &&
+	fs.realpathSync(fileURLToPath(import.meta.url)) === resolvedArgv1;
 
 if (isMainModule) {
 	startMcpServer();
