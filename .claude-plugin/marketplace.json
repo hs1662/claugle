@@ -1,0 +1,34 @@
+{
+	"name": "claugle",
+	"owner": {
+		"name": "claugle contributors",
+		"email": "maintainers@example.com"
+	},
+	"metadata": {
+		"description": "Route Claude Code tasks across Google AI subscription quota (agy Gemini 4 Argon, Gemini 3.8 Flash, Claude 5.5, and gemini CLI) with 7-day rolling quota governance.",
+		"version": "1.0.0"
+	},
+	"plugins": [
+		{
+			"name": "claugle",
+			"source": "./plugins/claugle",
+			"description": "Google AI subscription model router and weekly quota governor for Claude Code via agy and gemini headless CLIs.",
+			"version": "1.0.0",
+			"author": {
+				"name": "claugle contributors"
+			},
+			"homepage": "https://github.com/hs1662/claugle",
+			"repository": "https://github.com/hs1662/claugle",
+			"license": "MIT",
+			"keywords": [
+				"google-ai",
+				"gemini",
+				"antigravity",
+				"agy",
+				"quota",
+				"routing"
+			],
+			"category": "productivity"
+		}
+	]
+}

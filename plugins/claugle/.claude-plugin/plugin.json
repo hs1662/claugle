@@ -1,0 +1,51 @@
+{
+	"name": "claugle",
+	"version": "1.0.0",
+	"description": "Route Claude Code tasks across Google AI subscription models (agy Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus/Sonnet 5.5, and gemini CLI) with hysteresis quota governance and git worktree sandboxing.",
+	"author": {
+		"name": "claugle contributors"
+	},
+	"homepage": "https://github.com/hs1662/claugle",
+	"repository": "https://github.com/hs1662/claugle",
+	"license": "MIT",
+	"keywords": [
+		"google-ai",
+		"gemini",
+		"antigravity",
+		"agy",
+		"quota-governor",
+		"model-routing"
+	],
+	"userConfig": {
+		"claude_weekly_token_budget": {
+			"title": "Claude Code Weekly Token Budget",
+			"description": "Rolling 7-day token budget for native Claude Code usage before entering CONSERVE_CLAUDE (70%) and OVERFLOW_TO_AGY (90%).",
+			"type": "number",
+			"default": 5000000
+		},
+		"agy_claude_weekly_token_budget": {
+			"title": "Agy Claude Pool Weekly Token Budget",
+			"description": "Rolling 7-day token budget for Google AI Antigravity Claude Opus/Sonnet 5.5 models.",
+			"type": "number",
+			"default": 8000000
+		},
+		"agy_gemini_weekly_token_budget": {
+			"title": "Agy Gemini Pool Weekly Token Budget",
+			"description": "Rolling 7-day token budget for Google AI Antigravity Gemini 4 Argon and Gemini 3.8 Flash models.",
+			"type": "number",
+			"default": 15000000
+		},
+		"gemini_cli_weekly_token_budget": {
+			"title": "Gemini CLI Pool Weekly Token Budget",
+			"description": "Rolling 7-day token budget for standalone Gemini CLI models (gemini-2.5-pro and gemini-2.5-flash).",
+			"type": "number",
+			"default": 10000000
+		},
+		"default_agy_mode": {
+			"title": "Default Agy Execution Mode",
+			"description": "Default execution mode for agy headless calls (plan, accept-edits, or auto).",
+			"type": "string",
+			"default": "accept-edits"
+		}
+	}
+}

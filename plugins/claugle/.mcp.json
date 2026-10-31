@@ -1,0 +1,14 @@
+{
+	"mcpServers": {
+		"claugle": {
+			"command": "node",
+			"args": [
+				"${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.mjs"
+			],
+			"env": {
+				"CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}",
+				"CLAUDE_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+			}
+		}
+	}
+}
