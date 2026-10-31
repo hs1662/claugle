@@ -750,3 +750,127 @@ process.stdout.write(JSON.stringify({
 		fs.rmSync(binDir, { recursive: true, force: true });
 	});
 });
+
+function auditMarkdownDocument({ filePath, content, checkLinksOnDisk = true }) {
+	const issues = [];
+	const relName = path.basename(filePath);
+	const isEnglishDoc =
+		relName === "README.en.md" ||
+		filePath.includes("/agents/") ||
+		filePath.includes("/commands/") ||
+		filePath.includes("/skills/");
+
+	if (
+		filePath.includes("/agents/") ||
+		filePath.includes("/commands/") ||
+		filePath.includes("/skills/")
+	) {
+		const fmMatch = /^---\n([\s\S]*?)\n---\n/.exec(content);
+		if (!fmMatch) {
+			issues.push(`missing YAML frontmatter in ${relName}`);
+		} else {
+			const fm = fmMatch[1];
+			if (!/^description:\s*\S+/m.test(fm)) {
+				issues.push(`missing description in frontmatter of ${relName}`);
+			}
+			if (
+				(filePath.includes("/agents/") || filePath.includes("/skills/")) &&
+				!/^name:\s*\S+/m.test(fm)
+			) {
+				issues.push(`missing name in frontmatter of ${relName}`);
+			}
+		}
+	}
+
+	const linkRegex = /\[[^\]]+\]\(([^)#]+)\)/g;
+	for (const match of content.matchAll(linkRegex)) {
+		const target = match[1].trim();
+		if (/^[a-z]+:\/\//i.test(target)) continue;
+		if (checkLinksOnDisk) {
+			const resolved = path.resolve(path.dirname(filePath), target);
+			if (!fs.existsSync(resolved)) {
+				issues.push(`broken relative link ${target} in ${relName}`);
+			}
+		}
+	}
+
+	if (isEnglishDoc) {
+		const slopRe =
+			/\b(?:delve|tapestry|testament|pivotal|vibrant|fostering|garner|interplay|intricate|utilize|leverage)\b/i;
+		const hit = slopRe.exec(content);
+		if (hit) {
+			issues.push(`english slop token '${hit[0]}' in ${relName}`);
+		}
+		if (content.includes("—")) {
+			issues.push(`em-dash found in ${relName}`);
+		}
+	}
+
+	const koreanInterferenceRe =
+		/(?:되어지|보여지|쓰여지|잊혀지|에서의|으로의|에로의|로부터의|가지고 있|갖고 있|결론적으로|요약하자면|에 의해)/;
+	const koHit = koreanInterferenceRe.exec(content);
+	if (koHit) {
+		issues.push(`korean interference token '${koHit[0]}' in ${relName}`);
+	}
+
+	return issues;
+}
+
+describe("Markdown Documentation and Prompt Contracts", () => {
+	it("verifies all 13 repository markdown files and catches seeded negative controls", () => {
+		const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+		const expectedMarkdownFiles = [
+			"README.md",
+			"README.en.md",
+			"docs/architecture.md",
+			"plugins/claugle/README.md",
+			"plugins/claugle/agents/agy-coder.md",
+			"plugins/claugle/agents/agy-reviewer.md",
+			"plugins/claugle/agents/gemini-writer.md",
+			"plugins/claugle/commands/explain.md",
+			"plugins/claugle/commands/quota.md",
+			"plugins/claugle/commands/review.md",
+			"plugins/claugle/commands/task.md",
+			"plugins/claugle/commands/write.md",
+			"plugins/claugle/skills/claugle-routing/SKILL.md",
+		];
+
+		for (const relPath of expectedMarkdownFiles) {
+			const fullPath = path.join(repoRoot, relPath);
+			assert.equal(fs.existsSync(fullPath), true, `expected ${relPath} to exist`);
+			const content = fs.readFileSync(fullPath, "utf8");
+			const issues = auditMarkdownDocument({ filePath: fullPath, content });
+			assert.deepEqual(issues, [], `unexpected markdown issues in ${relPath}`);
+		}
+
+		const seededBrokenLink = auditMarkdownDocument({
+			filePath: path.join(repoRoot, "README.en.md"),
+			content: "# Title\n\nSee [missing](docs/does-not-exist.md).\n",
+		});
+		assert.deepEqual(seededBrokenLink, ["broken relative link docs/does-not-exist.md in README.en.md"]);
+
+		const seededEnglishSlop = auditMarkdownDocument({
+			filePath: path.join(repoRoot, "README.en.md"),
+			content: "# Title\n\nWe utilize a vibrant — architecture.\n",
+			checkLinksOnDisk: false,
+		});
+		assert.deepEqual(seededEnglishSlop, [
+			"english slop token 'utilize' in README.en.md",
+			"em-dash found in README.en.md",
+		]);
+
+		const seededKoreanSlop = auditMarkdownDocument({
+			filePath: path.join(repoRoot, "README.md"),
+			content: "# 제목\n\n결론적으로 시스템에 의해 처리되어진다.\n",
+			checkLinksOnDisk: false,
+		});
+		assert.deepEqual(seededKoreanSlop, ["korean interference token '결론적으로' in README.md"]);
+
+		const seededMissingFrontmatter = auditMarkdownDocument({
+			filePath: path.join(repoRoot, "plugins/claugle/skills/claugle-routing/SKILL.md"),
+			content: "---\ndescription: Missing name field\n---\n\nBody.\n",
+			checkLinksOnDisk: false,
+		});
+		assert.deepEqual(seededMissingFrontmatter, ["missing name in frontmatter of SKILL.md"]);
+	});
+});
