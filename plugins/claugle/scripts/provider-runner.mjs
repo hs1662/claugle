@@ -317,11 +317,14 @@ export function prepareAgyHome(pluginDataDir, realHome = os.homedir()) {
 	return home;
 }
 
-// agy's default agent carries a long system prompt and its own tool set. claugle runs agy as a custom
-// agent whose prompt is one line and whose tools are only what the path needs: the gateway needs
-// finish to return its structured answer, delegated runs need file tools. Claude Code's harness,
-// carried in the prompt, is the only rule set. The gate folder is a second workspace root, so a
-// delegated agent is told which root is the project; otherwise the model starts in the gate folder.
+// claugle runs agy as a custom agent whose prompt is one line and whose tools are only what the path
+// needs: the gateway needs finish to return its structured answer, delegated runs need file tools.
+// A custom agent otherwise inherits agy's default prompt sections and every rule, skill, agent and
+// plugin agy finds, global or the project's own AGENTS.md and GEMINI.md. excludeDefaultComponents
+// and the empty lists keep all of them out of the model's context while agy still runs the
+// PreToolUse gate, so Claude Code's harness, carried in the prompt, is the only rule set. The gate
+// folder is a second workspace root, so a delegated agent is told which root is the project;
+// otherwise the model starts in the gate folder.
 const AGY_READ_TOOLS = Object.freeze(["view_file", "list_dir", "grep_search", "find_by_name"]);
 const AGY_AGENT_PROFILES = Object.freeze({
 	"claugle-gateway": {
@@ -351,6 +354,11 @@ export function writeAgyAgent(dir, name, projectDir) {
 		`name: ${name}`,
 		"description: claugle worker",
 		"mainAgent: true",
+		"excludeDefaultComponents: true",
+		"skills: []",
+		"rules: []",
+		"agents: []",
+		"plugins: []",
 		"tools:",
 		...profile.tools.map((tool) => `  - ${tool}`),
 		"---",

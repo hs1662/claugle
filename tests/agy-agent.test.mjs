@@ -22,9 +22,11 @@ const def = agent && roots.map((r) => path.join(r, ".agents", "agents", agent, "
 const body = def ? fs.readFileSync(def, "utf8") : "";
 const tools = [...body.matchAll(/^  - (\\S+)$/gm)].map((m) => m[1]);
 const namesProject = body.includes(process.cwd());
+const front = (body.split("---")[1] ?? "").split("\\n");
+const optsOut = ["excludeDefaultComponents: true", "skills: []", "rules: []", "agents: []", "plugins: []"].every((line) => front.includes(line));
 process.stdin.resume();
 process.stdin.on("end", () => {
-  const response = JSON.stringify({ agent, tools, namesProject });
+  const response = JSON.stringify({ agent, tools, namesProject, optsOut });
   process.stdout.write(JSON.stringify({ response, structured_output: { text: response, tool_calls: [] }, usage: {} }) + "\\n");
 });
 `,
@@ -33,7 +35,7 @@ process.stdin.on("end", () => {
 	return file;
 };
 
-describe("claugle runs agy as a minimal custom agent with only the tools each path needs", () => {
+describe("claugle runs agy as a minimal custom agent with only the tools each path needs and none of agy's ambient rules, skills, agents or plugins", () => {
 	it("passes --agent to agy and rejects names that are not plain identifiers", () => {
 		const args = buildAgyCliArgs({ prompt: "x", modelSlug: "gemini-4-argon-high", effort: "high", mode: "plan", cwd: os.tmpdir(), agent: "claugle-reader" });
 		assert.equal(args[args.indexOf("--agent") + 1], "claugle-reader");
@@ -54,7 +56,7 @@ describe("claugle runs agy as a minimal custom agent with only the tools each pa
 		} finally {
 			gw.server.close();
 		}
-		assert.deepEqual(JSON.parse(body.content[0].text), { agent: "claugle-gateway", tools: ["finish"], namesProject: false });
+		assert.deepEqual(JSON.parse(body.content[0].text), { agent: "claugle-gateway", tools: ["finish"], namesProject: false, optsOut: true });
 	});
 
 	it("delegated runs get read tools, plus write tools only for edit runs, and are told which folder is the project", async () => {
@@ -68,12 +70,13 @@ describe("claugle runs agy as a minimal custom agent with only the tools each pa
 		const agy = agentProbe(tmp("claugle-agent-bin-"));
 		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("claugle-agent-data-"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
 		const read = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env });
-		assert.deepEqual(JSON.parse(read.responseText), { agent: "claugle-reader", tools: ["view_file", "list_dir", "grep_search", "find_by_name"], namesProject: true });
+		assert.deepEqual(JSON.parse(read.responseText), { agent: "claugle-reader", tools: ["view_file", "list_dir", "grep_search", "find_by_name"], namesProject: true, optsOut: true });
 		const edit = await executeRoutedTask({ request: parseTaskRequest({ prompt: "update docs/guide.md", explicitTaskKind: "docs", allowFileEdits: true, allowedEditGlobs: ["docs/**"], cwd: repo }).value, env });
 		assert.deepEqual(JSON.parse(edit.responseText.split("\n")[0]), {
 			agent: "claugle-editor",
 			tools: ["view_file", "list_dir", "grep_search", "find_by_name", "write_to_file", "replace_file_content", "multi_replace_file_content"],
 			namesProject: true,
+			optsOut: true,
 		});
 	});
 });
