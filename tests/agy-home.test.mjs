@@ -11,43 +11,12 @@ const tmp = (prefix) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), pr
 
 function fakeRealHome() {
 	const home = tmp("claugle-home-real-");
-	fs.mkdirSync(path.join(home, ".config", "gcloud"), { recursive: true });
-	fs.writeFileSync(path.join(home, ".gitconfig"), "[user]\n");
 	fs.mkdirSync(path.join(home, ".gemini", "antigravity-cli"), { recursive: true });
 	fs.writeFileSync(path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "token");
-	for (const rel of ["plugins/pstack", "projects"]) fs.mkdirSync(path.join(home, ".gemini", "config", rel), { recursive: true });
-	fs.writeFileSync(path.join(home, ".gemini", "config", "mcp_config.json"), "{}");
-	fs.writeFileSync(path.join(home, ".gemini", "config", "hooks.json"), "{}");
-	fs.writeFileSync(path.join(home, ".gemini", "config", "import_manifest.json"), "{}");
-	fs.writeFileSync(path.join(home, ".gemini", "config", "config.json"), '{"plugins":{"pstack":{"enabled":true}}}');
 	return home;
 }
 
 describe("claugle runs agy in a home without the user's global agy plugins, MCP servers and hooks", () => {
-	it("mirrors the real home except agy's global plugins, MCP config and hooks", () => {
-		const real = fakeRealHome();
-		const home = prepareAgyHome(tmp("claugle-data-"), real);
-		const config = path.join(home, ".gemini", "config");
-		assert.equal(fs.readFileSync(path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"), "utf8"), "token");
-		assert.ok(fs.existsSync(path.join(home, ".gitconfig")));
-		assert.ok(fs.existsSync(path.join(home, ".config", "gcloud")));
-		assert.ok(fs.existsSync(path.join(config, "projects")));
-		for (const hidden of ["plugins", "mcp_config.json", "hooks.json", "config.json", "import_manifest.json"]) {
-			assert.equal(fs.existsSync(path.join(config, hidden)), false, hidden);
-		}
-	});
-
-	it("is idempotent and drops links whose target disappeared", () => {
-		const real = fakeRealHome();
-		const data = tmp("claugle-data-");
-		prepareAgyHome(data, real);
-		fs.rmSync(path.join(real, ".gitconfig"));
-		fs.writeFileSync(path.join(real, ".npmrc"), "x");
-		const home = prepareAgyHome(data, real);
-		assert.equal(fs.existsSync(path.join(home, ".gitconfig")), false);
-		assert.ok(fs.existsSync(path.join(home, ".npmrc")));
-	});
-
 	it("starts agy with that home", async () => {
 		const dir = tmp("claugle-agyhome-bin-");
 		const agy = path.join(dir, "agy");

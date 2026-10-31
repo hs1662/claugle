@@ -274,46 +274,50 @@ export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], denyRea
 	return dir;
 }
 
-// Under claugle only Claude Code's harness may instruct the model. agy loads the user's global plugins,
-// MCP servers and hooks from ~/.gemini/config, so agy runs in a mirror of the home that links every
-// other entry (login, gcloud, git) but leaves those out, along with the plugin registry files agy
-// could rewrite through a link. Files agy itself creates there stay.
-const AGY_HOME_LAYOUT = Object.freeze({ ".gemini": { config: { hidden: ["plugins", "mcp_config.json", "hooks.json", "config.json", "import_manifest.json"] } } });
+// agy reads rules, skills, plugins, agents, workflows, sidecars, hooks and MCP servers from many
+// places under ~/.gemini (GEMINI.md and AGENTS.md, config/, antigravity-cli/hooks.json). So agy runs
+// in a home that holds only the login token, linked so that agy's token refreshes reach the real
+// home; agy creates the rest of its state there itself. Without config/.migrated agy migrates
+// antigravity-cli/hooks.json on start.
+const AGY_HOME_LINKS = Object.freeze([".gemini/antigravity-cli/antigravity-oauth-token"]);
+const AGY_HOME_FILES = Object.freeze([".gemini/config/.migrated"]);
 
-function mirrorDir(src, dst, layout) {
-	fs.mkdirSync(dst, { recursive: true });
-	const hidden = new Set(layout.hidden ?? []);
-	let names = [];
-	try {
-		names = fs.readdirSync(src);
-	} catch {}
-	const wanted = new Set(names.filter((name) => !hidden.has(name)));
-	for (const name of wanted) {
-		const from = path.join(src, name);
-		const to = path.join(dst, name);
-		if (layout[name] && typeof layout[name] === "object" && !Array.isArray(layout[name])) {
-			mirrorDir(from, to, layout[name]);
-			continue;
+function removeLinksExcept(dir, keep) {
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		const full = path.join(dir, entry.name);
+		if (entry.isSymbolicLink()) {
+			if (!keep.has(full)) fs.rmSync(full, { force: true });
+		} else if (entry.isDirectory()) {
+			removeLinksExcept(full, keep);
 		}
-		const existing = fs.lstatSync(to, { throwIfNoEntry: false });
-		if (existing?.isSymbolicLink() && fs.readlinkSync(to) === from) continue;
-		if (existing && !existing.isSymbolicLink()) continue;
-		if (existing) fs.rmSync(to, { force: true });
-		try {
-			fs.symlinkSync(from, to);
-		} catch (err) {
-			if (err?.code !== "EEXIST") throw err;
-		}
-	}
-	for (const name of fs.readdirSync(dst)) {
-		const to = path.join(dst, name);
-		if (!wanted.has(name) && fs.lstatSync(to, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(to, { force: true });
 	}
 }
 
 export function prepareAgyHome(pluginDataDir, realHome = os.homedir()) {
 	const home = path.join(pluginDataDir, "agy-home");
-	mirrorDir(realHome, home, AGY_HOME_LAYOUT);
+	fs.mkdirSync(home, { recursive: true });
+	const links = AGY_HOME_LINKS.map((rel) => ({ link: path.join(home, rel), target: path.join(realHome, rel) }));
+	const isLinked = ({ link, target }) => {
+		try {
+			return fs.readlinkSync(link) === target;
+		} catch {
+			return false;
+		}
+	};
+	removeLinksExcept(home, new Set(links.filter(isLinked).map(({ link }) => link)));
+	for (const { link, target } of links.filter((entry) => !isLinked(entry))) {
+		fs.mkdirSync(path.dirname(link), { recursive: true });
+		fs.rmSync(link, { recursive: true, force: true });
+		try {
+			fs.symlinkSync(target, link);
+		} catch (err) {
+			if (err?.code !== "EEXIST") throw err;
+		}
+	}
+	for (const rel of AGY_HOME_FILES) {
+		fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+		fs.closeSync(fs.openSync(path.join(home, rel), "a"));
+	}
 	return home;
 }
 

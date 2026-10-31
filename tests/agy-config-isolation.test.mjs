@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { parsePluginEnv, parseTaskRequest } from "../plugins/claugle/scripts/policy-engine.mjs";
-import { buildAgyCliArgs, executeRoutedTask } from "../plugins/claugle/scripts/provider-runner.mjs";
+import { buildAgyCliArgs, executeRoutedTask, prepareAgyHome } from "../plugins/claugle/scripts/provider-runner.mjs";
 
 const tmp = (prefix) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 
@@ -105,5 +105,103 @@ describe("agy never starts where any agy customization folder would run commands
 		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
 		assert.equal(out.status, "COMPLETED", out.responseText);
 		assert.equal(agy.started(), true);
+	});
+});
+
+const TOKEN = ".gemini/antigravity-cli/antigravity-oauth-token";
+const AGY_GLOBAL_CUSTOMIZATIONS = [
+	".gemini/GEMINI.md",
+	".gemini/AGENTS.md",
+	".gemini/config/GEMINI.md",
+	".gemini/config/AGENTS.md",
+	".gemini/config/rules/r.md",
+	".gemini/config/skills/s/SKILL.md",
+	".gemini/config/skills.json",
+	".gemini/config/rules.json",
+	".gemini/config/plugins.json",
+	".gemini/config/agents.json",
+	".gemini/config/workflows/w.md",
+	".gemini/config/global_workflows/w.md",
+	".gemini/config/sidecars/s/sidecar.json",
+	".gemini/antigravity-cli/hooks.json",
+	".gemini/config/plugins/p/plugin.json",
+	".gemini/config/mcp_config.json",
+	".gemini/config/hooks.json",
+	".gemini/config/config.json",
+];
+
+function fakeRealHome() {
+	const home = tmp("claugle-iso-realhome-");
+	for (const rel of [TOKEN, ".gitconfig", ".gemini/config/.migrated", ...AGY_GLOBAL_CUSTOMIZATIONS]) {
+		fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+		fs.writeFileSync(path.join(home, rel), rel === TOKEN ? "token" : "x");
+	}
+	return home;
+}
+
+function snapshot(root) {
+	const out = {};
+	const walk = (dir) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			const rel = path.relative(root, full);
+			if (entry.isSymbolicLink()) out[rel] = `link:${fs.readlinkSync(full)}`;
+			else if (entry.isDirectory()) {
+				out[rel] = "dir";
+				walk(full);
+			} else out[rel] = `file:${fs.readFileSync(full, "base64")}`;
+		}
+	};
+	walk(root);
+	return out;
+}
+
+const linksIn = (root) => Object.entries(snapshot(root)).filter(([, v]) => v.startsWith("link:")).map(([rel]) => rel);
+
+describe("agy runs in a home that carries only the login token", () => {
+	it("exposes the token and none of agy's global rules, skills, plugins, hooks or MCP servers", () => {
+		const real = fakeRealHome();
+		const home = prepareAgyHome(tmp("claugle-iso-data-"), real);
+		for (const rel of [...AGY_GLOBAL_CUSTOMIZATIONS, ".gitconfig"]) assert.equal(fs.existsSync(path.join(home, rel)), false, rel);
+		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN));
+		assert.equal(fs.readFileSync(path.join(home, ".gemini/config/.migrated"), "utf8"), "");
+		assert.deepEqual(linksIn(home), [TOKEN]);
+	});
+
+	it("converges a home the old mirror left behind and never changes the real home", () => {
+		const real = fakeRealHome();
+		const before = snapshot(real);
+		const data = tmp("claugle-iso-data-");
+		const home = path.join(data, "agy-home");
+		fs.mkdirSync(path.join(home, ".gemini", "config"), { recursive: true });
+		fs.symlinkSync(path.join(real, ".gitconfig"), path.join(home, ".gitconfig"));
+		fs.symlinkSync(path.join(real, ".gemini", "antigravity-cli"), path.join(home, ".gemini", "antigravity-cli"));
+		fs.symlinkSync(path.join(real, ".gemini", "GEMINI.md"), path.join(home, ".gemini", "GEMINI.md"));
+		for (const name of ["rules", "skills", "skills.json", "plugins.json", "sidecars", ".migrated"]) {
+			fs.symlinkSync(path.join(real, ".gemini", "config", name), path.join(home, ".gemini", "config", name));
+		}
+		fs.symlinkSync(path.join(real, "gone"), path.join(home, ".gemini", "config", "stale"));
+		fs.writeFileSync(path.join(home, ".gemini", "config", "config.json"), "agy");
+		fs.mkdirSync(path.join(home, ".gemini", "brain", "b1"), { recursive: true });
+		fs.writeFileSync(path.join(home, ".gemini", "brain", "b1", "note"), "agy");
+
+		prepareAgyHome(data, real);
+		assert.deepEqual(linksIn(home), [TOKEN]);
+		assert.equal(fs.lstatSync(path.join(home, ".gemini", "antigravity-cli")).isDirectory(), true);
+		assert.equal(fs.readFileSync(path.join(home, TOKEN), "utf8"), "token");
+		for (const rel of AGY_GLOBAL_CUSTOMIZATIONS.filter((r) => r !== ".gemini/config/config.json")) assert.equal(fs.existsSync(path.join(home, rel)), false, rel);
+		assert.equal(fs.readFileSync(path.join(home, ".gemini", "config", "config.json"), "utf8"), "agy");
+		assert.equal(fs.readFileSync(path.join(home, ".gemini", "brain", "b1", "note"), "utf8"), "agy");
+		assert.equal(fs.readFileSync(path.join(home, ".gemini/config/.migrated"), "utf8"), "");
+
+		fs.rmSync(path.join(home, TOKEN));
+		fs.writeFileSync(path.join(home, TOKEN), "stale copy");
+		prepareAgyHome(data, real);
+		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN), "a replaced token link is linked again");
+		fs.rmSync(path.join(home, TOKEN));
+		prepareAgyHome(data, real);
+		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN), "a missing token link is linked again");
+
+		assert.deepEqual(snapshot(real), before);
 	});
 });
