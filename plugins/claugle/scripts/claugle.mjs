@@ -287,26 +287,20 @@ function extractEdgeFlags(tokens, options) {
 
 function extractFlags(tokens, options) {
 	const promptTokens = [];
-	for (let i = 0; i < tokens.length; i += 1) {
-		const flag = tokens[i].quoted ? undefined : tokens[i].value;
-		if (flag === "--") {
+	for (let i = 0; i < tokens.length; ) {
+		if (!tokens[i].quoted && tokens[i].value === "--") {
 			promptTokens.push(...tokens.slice(i + 1));
 			break;
 		}
-		if (Object.hasOwn(VALUE_FLAGS, flag)) {
-			if (i + 1 === tokens.length) {
-				throw new Error(`${flag} needs a value.`);
-			}
-			const key = VALUE_FLAGS[flag];
-			const value = tokens[i + 1].value;
-			if (LIST_OPTIONS.has(key)) options[key].push(value);
-			else options[key] = value;
-			i += 1;
-		} else if (Object.hasOwn(SWITCH_FLAGS, flag)) {
-			Object.assign(options, SWITCH_FLAGS[flag]);
-		} else {
+		const flag = flagAt(tokens, i, false);
+		if (!flag) {
 			promptTokens.push(tokens[i]);
+			i += 1;
+			continue;
 		}
+		if (flag.missingValueFor) throw new Error(`${flag.missingValueFor} needs a value.`);
+		flag.apply(options);
+		i += flag.width;
 	}
 	return promptTokens;
 }
