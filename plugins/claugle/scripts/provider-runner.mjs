@@ -879,10 +879,7 @@ export async function executeRoutedTask(params) {
 		}
 
 		let lease = null;
-		const useWorktree =
-			candidate.provider === "agy" &&
-			candidate.isolation.kind === "git-worktree" &&
-			isGitRepository(request.cwd);
+		const useWorktree = candidate.isolation.kind === "git-worktree" && isGitRepository(request.cwd);
 
 		if (useWorktree) {
 			try {
@@ -900,7 +897,7 @@ export async function executeRoutedTask(params) {
 			}
 		}
 
-		if (candidate.provider === "agy" && candidate.agyMode !== "plan" && !lease) {
+		if (candidate.agyMode !== "plan" && !lease) {
 			errors.push(
 				`${candidate.modelSlug}: refused to let agy edit files outside a git worktree (${request.cwd} is not a git repository).`
 			);
@@ -908,7 +905,7 @@ export async function executeRoutedTask(params) {
 		}
 
 		const projectDir = lease ? lease.executionCwd : request.cwd;
-		const customization = candidate.provider === "agy" ? findAgyCommandCustomization(projectDir) : null;
+		const customization = findAgyCommandCustomization(projectDir);
 		if (customization) {
 			if (lease) abortWorktreeLease(lease);
 			errors.push(
@@ -916,18 +913,15 @@ export async function executeRoutedTask(params) {
 			);
 			continue;
 		}
-		let gateDir = null;
-		if (candidate.provider === "agy") {
-			gateDir = path.join(env.pluginDataDir, "agy-gates", `${request.taskId}-${attemptedTargets.length}`);
-			writeAgyToolGate(gateDir, {
-				readRoots: [projectDir],
-				writeRoots: lease ? [projectDir] : [],
-				denyReason: lease
-					? `claugle: only file reads and writes under ${projectDir} are allowed, never in .git, .claude, .agents, .gemini or .mcp.json. Use paths under ${projectDir}.`
-					: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,
-			});
-		}
-		const agyAgent = gateDir ? writeAgyAgent(gateDir, lease ? "claugle-editor" : "claugle-reader", projectDir) : undefined;
+		const gateDir = path.join(env.pluginDataDir, "agy-gates", `${request.taskId}-${attemptedTargets.length}`);
+		writeAgyToolGate(gateDir, {
+			readRoots: [projectDir],
+			writeRoots: lease ? [projectDir] : [],
+			denyReason: lease
+				? `claugle: only file reads and writes under ${projectDir} are allowed, never in .git, .claude, .agents, .gemini or .mcp.json. Use paths under ${projectDir}.`
+				: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,
+		});
+		const agyAgent = writeAgyAgent(gateDir, lease ? "claugle-editor" : "claugle-reader", projectDir);
 		let execResult;
 		try {
 			execResult = await runHeadlessProvider({
@@ -938,14 +932,14 @@ export async function executeRoutedTask(params) {
 				effort: candidate.effort,
 				mode: candidate.agyMode,
 				cwd: projectDir,
-				addDirs: gateDir ? [gateDir] : undefined,
-				agyHome: candidate.provider === "agy" ? prepareAgyHome(env.pluginDataDir) : undefined,
+				addDirs: [gateDir],
+				agyHome: prepareAgyHome(env.pluginDataDir),
 				agent: agyAgent,
 				hostRepoRoot: lease?.hostRepoRoot,
 				timeoutMs: candidate.timeoutMs,
 			});
 		} finally {
-			if (gateDir) fs.rmSync(gateDir, { recursive: true, force: true });
+			fs.rmSync(gateDir, { recursive: true, force: true });
 		}
 
 		const recordRunUsage = (status) =>
