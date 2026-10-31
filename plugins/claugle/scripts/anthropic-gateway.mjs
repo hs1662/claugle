@@ -154,8 +154,6 @@ export function readSettingsBaseUrl(settingsPath = path.join(os.homedir(), ".cla
 	}
 }
 
-// A loopback base URL left by claugle may point at a port it no longer uses. It is replaced when
-// nothing answers there or a claugle gateway answers; any other local proxy is the user's choice.
 export async function isReplaceableLocalBaseUrl(url) {
 	const match = LOOPBACK_URL.exec(String(url ?? ""));
 	if (!match) return false;
@@ -1134,8 +1132,6 @@ async function waitFor(predicate, deadlineMs = 3000, intervalMs = 125) {
 	return false;
 }
 
-// Daemons from builds before /admin/shutdown existed can only be stopped by signal. They were all
-// started as `node .../scripts/claugle.mjs gateway --port <port>`.
 function stopClaugleDaemonsOnPort(port) {
 	let listing = "";
 	try {

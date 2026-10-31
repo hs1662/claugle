@@ -1047,12 +1047,8 @@ export function parsePluginEnv(rawEnv = process.env) {
 	};
 }
 
-// Files and folders that configure Claude Code, agy or gemini. Writing them would change the harness
-// itself, so neither the agy tool gate nor the worktree harvest lets a delegated model touch them.
 export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ".agents", ".claude", ".gemini", ".mcp.json"]);
 
-// A task id names folders and branches under the plugin data dir, so it may not carry separators.
-// Callers get a shorter limit than the runner so its per-attempt suffixes still fit.
 const MAX_REQUEST_TASK_ID_LENGTH = 100;
 export function isSafeTaskId(taskId) {
 	return typeof taskId === "string" && /^task-[A-Za-z0-9_-]{1,120}$/.test(taskId);

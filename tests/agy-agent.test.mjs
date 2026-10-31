@@ -9,8 +9,6 @@ import { buildAgyCliArgs, executeRoutedTask } from "../plugins/claugle/scripts/p
 
 const tmp = (prefix) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 
-// The stub reports which agent it was started with, the tool list that agent's definition grants,
-// and whether the definition names the folder agy runs in.
 const agentProbe = (dir) => {
 	const file = path.join(dir, "agy");
 	fs.writeFileSync(

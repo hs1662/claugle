@@ -168,9 +168,9 @@ function isWithin(target, dir) {
 // delegated run. `<category>(*)` matches every target and a path rule matches everything under it.
 const AGY_ALWAYS_DENIED = Object.freeze(["command(*)", "browser(*)", "mcp(*)", "subagent(*)", "url(*)", "read_url(*)"]);
 
-// An edit run may write only inside its worktree. Headless agy refuses any write it would have to ask
-// about, but it writes to the temp dir without asking, and the host repo is the one place where a
-// direct write would skip the glob check. A wildcard deny cannot be narrowed by an allow rule.
+// Headless agy refuses any write it would have to ask about, but it writes to the temp dir without
+// asking, and the host repo is the one place where a direct write would skip the glob check. A
+// wildcard deny cannot be narrowed by an allow rule.
 function agyDeniedPermissions(mode, cwd, hostRepoRoot) {
 	if (mode === "plan") {
 		return [...AGY_ALWAYS_DENIED, "write_file(*)"];
@@ -248,11 +248,7 @@ function writeFileIfChanged(filePath, content) {
 	fs.renameSync(tmpPath, filePath);
 }
 
-// agy loads PreToolUse hooks from the .agents folder of every workspace root. This gate is an
-// allow-list: finish, file reads under the read or write roots, and file writes under the write
-// roots pass, never inside .git, and writes never inside .agents. Every path argument must pass,
-// a dangling symlink never does, and everything else agy can do (commands, scheduling, messaging,
-// network, subagents) is denied.
+// agy loads PreToolUse hooks from the .agents folder of every workspace root.
 export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], denyReason }) {
 	const agentsDir = path.join(dir, ".agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -444,8 +440,6 @@ export function buildGeminiCliArgs(invocation) {
 	]);
 }
 
-// Only agy's own channels say why a run failed: stderr, plain-text stdout, and the error fields of
-// stream events. The model's words and tool output never pick the failure reason.
 function providerFailureText(stdout, stderr) {
 	const parts = [stderr];
 	const collectErrors = (event) => {
@@ -704,7 +698,6 @@ export function runHeadlessProvider(params) {
 		child.on("exit", (code) => {
 			if (settled) return;
 			exitCode = code;
-			// A leftover process that still holds stdout or stderr must not keep the run open.
 			timers.push(
 				setTimeout(() => {
 					killGroup("SIGKILL");
@@ -731,8 +724,6 @@ function isGitRepository(dirPath) {
 	}
 }
 
-// Context files are sent to an external model, so only a file whose real path stays inside the task
-// cwd is read. A symlink cannot reach past it.
 function formatPromptWithContextFiles(request) {
 	if (!Array.isArray(request.contextFiles) || request.contextFiles.length === 0) {
 		return request.prompt;
@@ -853,7 +844,6 @@ export async function executeRoutedTask(params) {
 			...extra,
 		});
 
-	// An explicit claugle run tries every external candidate before it hands the task back to Claude.
 	for (const candidate of plan.candidates) {
 		if (candidate.provider === "claude-native") {
 			continue;
@@ -967,7 +957,7 @@ export async function executeRoutedTask(params) {
 			});
 
 		// Headless agy ends a turn it could only finish by asking (a write outside the workspace, say)
-		// with exit 0 and an empty response. That run failed, and its partial edits are discarded.
+		// with exit 0 and an empty response.
 		const stoppedEarly =
 			execResult.kind === "success" &&
 			!execResult.payload.response.trim() &&
@@ -1150,8 +1140,6 @@ function sessionTranscripts(transcriptPath) {
 	return [transcriptPath, ...names.map((name) => path.join(subagentDir, name))];
 }
 
-// Reads only the complete lines past this transcript's cursor. Every message is recorded under its
-// message id, so a repeated line or a reset cursor cannot count twice. The ledger dedupes ids.
 function recordTranscriptUsage({ pluginDataDir, transcriptPath, sessionId, nowMs }) {
 	const cursorFile = path.join(
 		pluginDataDir,
@@ -1205,7 +1193,6 @@ function recordTranscriptUsage({ pluginDataDir, transcriptPath, sessionId, nowMs
 				});
 				continue;
 			}
-			// Gateway-served models (agy and gemini slugs or their aliases) bill their own pools.
 			if (message.model === "<synthetic>" || resolveModelAndEffort(message.model)) continue;
 			const recordedAt = Date.parse(entry.timestamp);
 			appendUsageEvent({

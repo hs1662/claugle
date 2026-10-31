@@ -5,9 +5,8 @@ import { HARNESS_CONFIG_NAMES, createTaskExecutionId, isSafeTaskId, parseAbsolut
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
-// claugle's git plumbing never runs hooks or an fsmonitor command. With a relative core.hooksPath,
-// git would read hooks from files the model can rewrite inside the worktree, and a nested
-// repository's config could name an fsmonitor command that `git add` would run.
+// With a relative core.hooksPath, git would read hooks from files the model can rewrite inside the
+// worktree, and a nested repository's config could name an fsmonitor command that `git add` would run.
 function runGit(repoDir, args, options = {}) {
 	return execFileSync("git", ["-C", repoDir, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args], {
 		encoding: options.encoding ?? "utf8",
@@ -224,8 +223,7 @@ export function harvestAndReleaseWorktree(arg) {
 
 		runWorktreeGit(lease, ["add", "-A"]);
 
-		// Plumbing output ignores user diff config and never quotes non-ASCII names. Paths are
-		// reported relative to the task cwd, so anything outside it starts with "../".
+		// Plumbing output ignores user diff config and never quotes non-ASCII names.
 		const modifiedFiles = runWorktreeGit(lease, ["diff-index", "--cached", "--name-only", "-z", lease.baseCommitSha])
 			.split("\0")
 			.filter(Boolean)

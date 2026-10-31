@@ -110,8 +110,6 @@ export function appendUsageEvent(arg1, arg2, arg3 = {}) {
 	});
 }
 
-// Compaction may move an expired shard aside while this write holds it open, so the write
-// is repeated until it lands in the file that currently lives at shardPath.
 const MAX_APPEND_ATTEMPTS = 5;
 
 function appendToShard(shardPath, text) {
@@ -345,8 +343,6 @@ export function compactExpiredLedgerShards(arg1, arg2 = {}) {
 	const removedShards = [];
 	const retainedShards = [];
 
-	// Shards are never rewritten because their owner may still be appending. A shard is
-	// deleted only when every event in it has expired.
 	for (const name of entries) {
 		const shardPath = path.join(ledgerDir, name);
 		let stat;

@@ -150,8 +150,6 @@ function findClosingQuote(text, openAt) {
 	return -1;
 }
 
-// A quote opens a group only at the start of a word and only when it is closed at the end
-// of a word, so apostrophes in prose ("the user's parser") stay literal.
 function scanShellTokens(text) {
 	const tokens = [];
 	let i = 0;
@@ -243,9 +241,6 @@ function parsesAsFlagRun(tokens, from) {
 	return true;
 }
 
-// Free text from a slash command is prose, so only a leading run of flags (any form) and a
-// trailing run of long flags count as options; "git commit -m" in a sentence stays prose, and a
-// bare "--" ends option parsing wherever it appears.
 function extractEdgeFlags(tokens, options) {
 	let start = 0;
 	for (;;) {
@@ -305,7 +300,6 @@ function extractFlags(tokens, options) {
 	return promptTokens;
 }
 
-// Rebuilds the prompt from the original text so quotes, newlines, and spacing survive.
 function spliceRawText(text, tokens) {
 	const runs = [];
 	for (const token of tokens) {
