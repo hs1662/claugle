@@ -9,6 +9,7 @@ import {
 import {
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
+	MODEL_CAPABILITIES,
 	classifyTask,
 	createTaskExecutionId,
 	parseAgyOutputJson,
@@ -142,19 +143,30 @@ export function buildAgyCliArgs(invocation) {
 	if (!invocation || typeof invocation.prompt !== "string" || invocation.prompt.trim().length === 0) {
 		throw new Error("AgyCliInvocation requires a non-empty prompt.");
 	}
+	const effectiveEffort =
+		MODEL_CAPABILITIES[invocation.modelSlug]?.defaultEffort ??
+		invocation.effort ??
+		"high";
 	const args = [
 		"-p",
 		invocation.prompt,
 		"--model",
 		invocation.modelSlug,
 		"--effort",
-		invocation.effort ?? "high",
+		effectiveEffort,
 		"--output-format",
 		"json",
 		"--disable-slash-commands",
 		"--mode",
 		invocation.mode ?? "plan",
 	];
+	if (invocation.jsonSchema) {
+		const serializedSchema =
+			typeof invocation.jsonSchema === "string"
+				? invocation.jsonSchema
+				: JSON.stringify(invocation.jsonSchema);
+		args.push("--json-schema", serializedSchema);
+	}
 	if (Array.isArray(invocation.addDirs)) {
 		for (const dir of invocation.addDirs) {
 			if (typeof dir === "string" && dir.length > 0) {
@@ -218,6 +230,7 @@ export function runHeadlessProvider(params) {
 					disableSlashCommands: true,
 					cwd,
 					addDirs: params.addDirs,
+					jsonSchema: params.jsonSchema,
 					timeoutMs,
 				});
 
@@ -569,11 +582,18 @@ function persistPluginDataEnvVar(envFile, pluginDataDir) {
 	if (!envFile) return false;
 	const parentDir = path.dirname(envFile);
 	if (!fs.existsSync(parentDir)) return false;
-	const exportLine = `export CLAUDE_PLUGIN_DATA=${JSON.stringify(pluginDataDir)}`;
 	const existing = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf8") : "";
+	const linesToAdd = [];
 	if (!existing.includes("CLAUDE_PLUGIN_DATA=")) {
+		linesToAdd.push(`export CLAUDE_PLUGIN_DATA=${JSON.stringify(pluginDataDir)}`);
+	}
+	if (!existing.includes("ANTHROPIC_BASE_URL=")) {
+		const gatewayPort = process.env.CLAUGLE_GATEWAY_PORT || "18789";
+		linesToAdd.push(`export ANTHROPIC_BASE_URL=${JSON.stringify(`http://127.0.0.1:${gatewayPort}`)}`);
+	}
+	if (linesToAdd.length > 0) {
 		const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-		fs.appendFileSync(envFile, `${prefix}${exportLine}\n`, "utf8");
+		fs.appendFileSync(envFile, `${prefix}${linesToAdd.join("\n")}\n`, "utf8");
 	}
 	return true;
 }

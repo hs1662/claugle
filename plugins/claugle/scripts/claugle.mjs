@@ -2,6 +2,17 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+	DEFAULT_GATEWAY_PORT,
+	GATEWAY_TURN_JSON_SCHEMA,
+	buildGatewayPrompt,
+	ensureGatewayDaemon,
+	extractSlashCommandFastPath,
+	formatAnthropicJsonResponse,
+	resolveGatewayCandidates,
+	startAnthropicGatewayServer,
+	writeAnthropicSseResponse,
+} from "./anthropic-gateway.mjs";
+import {
 	appendUsageEvent,
 	compactExpiredLedgerShards,
 	loadRollingQuotaSnapshot,
@@ -20,6 +31,7 @@ import {
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
 	EFFORT_LEVELS,
+	MODEL_ALIAS_MAP,
 	MODEL_CAPABILITIES,
 	classifyTask,
 	createTaskExecutionId,
@@ -32,6 +44,7 @@ import {
 	parsePluginEnv,
 	parseRelativeGlob,
 	parseTaskRequest,
+	resolveModelAlias,
 	resolveRoutePlan,
 	transitionQuotaState,
 } from "./policy-engine.mjs";
@@ -58,22 +71,29 @@ export {
 	ALL_QUOTA_POOLS,
 	ALL_QUOTA_STATES,
 	ALL_TASK_KINDS,
+	DEFAULT_GATEWAY_PORT,
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
 	EFFORT_LEVELS,
+	GATEWAY_TURN_JSON_SCHEMA,
 	MCP_TOOL_DEFINITIONS,
+	MODEL_ALIAS_MAP,
 	MODEL_CAPABILITIES,
 	abortWorktreeLease,
 	acquireWorktreeLease,
 	appendUsageEvent,
 	buildAgyCliArgs,
+	buildGatewayPrompt,
 	buildGeminiCliArgs,
 	classifyTask,
 	compactExpiredLedgerShards,
 	createTaskExecutionId,
 	detectProviderHealth,
+	ensureGatewayDaemon,
 	evaluateHookEvent,
 	executeRoutedTask,
+	extractSlashCommandFastPath,
+	formatAnthropicJsonResponse,
 	globToRegExp,
 	handleMcpJsonRpcRequest,
 	harvestAndReleaseWorktree,
@@ -91,10 +111,14 @@ export {
 	parseTaskRequest,
 	reconcileStaleWorktrees,
 	recordCircuitBreakerOpen,
+	resolveGatewayCandidates,
+	resolveModelAlias,
 	resolveRoutePlan,
 	runHeadlessProvider,
+	startAnthropicGatewayServer,
 	startMcpServer,
 	transitionQuotaState,
+	writeAnthropicSseResponse,
 };
 
 export function tokenizeShellArgs(rawArgString) {
@@ -227,6 +251,16 @@ export function parseCliSubcommandArgs(rawArgs) {
 			i += 1;
 			continue;
 		}
+		if (arg === "--port") {
+			options.port = Number(expanded[i + 1]);
+			i += 2;
+			continue;
+		}
+		if (arg === "--daemon") {
+			options.daemon = true;
+			i += 1;
+			continue;
+		}
 		if (arg === "--") {
 			positional.push(...expanded.slice(i + 1));
 			break;
@@ -261,6 +295,15 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 
 	if (subcommand === "hook") {
 		const stdinText = readAllStdinSync();
+		if (
+			rawEnv.CLAUGLE_SKIP_GATEWAY_AUTOSTART !== "1" &&
+			(!stdinText || stdinText.includes("SessionStart"))
+		) {
+			await ensureGatewayDaemon({
+				port: Number(rawEnv.CLAUGLE_GATEWAY_PORT) || DEFAULT_GATEWAY_PORT,
+				pluginRoot: rawEnv.CLAUDE_PLUGIN_ROOT,
+			});
+		}
 		const hookOut = evaluateHookEvent({
 			hookStdinJson: stdinText,
 			env: rawEnv,
@@ -275,6 +318,32 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 		return 1;
 	}
 	const env = envRes.value;
+
+	const { options, prompt } = parseCliSubcommandArgs(restArgs);
+
+	if (subcommand === "gateway") {
+		const port =
+			Number.isFinite(options.port) && options.port > 0
+				? Math.floor(options.port)
+				: Number(rawEnv.CLAUGLE_GATEWAY_PORT) || DEFAULT_GATEWAY_PORT;
+		if (options.daemon) {
+			const status = await ensureGatewayDaemon({
+				port,
+				pluginRoot: env.pluginRoot,
+			});
+			process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+			return status.status === "failed-to-start" ? 1 : 0;
+		}
+		const started = await startAnthropicGatewayServer({
+			port,
+			env,
+		});
+		process.stdout.write(
+			`${JSON.stringify({ status: "listening", port: started.port, url: started.url })}\n`
+		);
+		await new Promise(() => {});
+		return 0;
+	}
 
 	if (subcommand === "quota") {
 		const snapshot = loadRollingQuotaSnapshot({
@@ -292,8 +361,6 @@ export async function runCli(argv = process.argv.slice(2), rawEnv = process.env)
 		process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 		return 0;
 	}
-
-	const { options, prompt } = parseCliSubcommandArgs(restArgs);
 
 	if (subcommand === "record-native") {
 		const totalTokens = Number.isFinite(options.tokens) && options.tokens > 0 ? Math.floor(options.tokens) : 0;

@@ -180,6 +180,39 @@ const GEMINI_CLI_MODEL_SET = new Set(
 		.map((cap) => cap.slug)
 );
 
+export const MODEL_ALIAS_MAP = Object.freeze({
+	argon: "gemini-4-argon-high",
+	"argon-high": "gemini-4-argon-high",
+	"argon-medium": "gemini-4-argon-medium",
+	"argon-low": "gemini-4-argon-low",
+	"gemini-4-argon": "gemini-4-argon-high",
+	flash: "gemini-3.8-flash-high",
+	"flash-high": "gemini-3.8-flash-high",
+	"flash-medium": "gemini-3.8-flash-medium",
+	"flash-low": "gemini-3.8-flash-low",
+	"gemini-3.8-flash": "gemini-3.8-flash-high",
+	"agy-opus": "claude-opus-5-5-high",
+	"agy-opus-high": "claude-opus-5-5-high",
+	"agy-opus-medium": "claude-opus-5-5-medium",
+	"agy-opus-low": "claude-opus-5-5-low",
+	"agy-sonnet": "claude-sonnet-5-5-high",
+	"agy-sonnet-high": "claude-sonnet-5-5-high",
+	"agy-sonnet-medium": "claude-sonnet-5-5-medium",
+	"agy-sonnet-low": "claude-sonnet-5-5-low",
+	"gpt-oss": "gpt-oss-120b-medium",
+});
+
+export function resolveModelAlias(rawModel) {
+	if (typeof rawModel !== "string") return null;
+	const cleaned = rawModel.trim().replace(/\[[^\]]+\]$/i, "").toLowerCase();
+	if (!cleaned) return null;
+	const mapped = MODEL_ALIAS_MAP[cleaned] ?? cleaned;
+	if (AGY_MODEL_SET.has(mapped) || GEMINI_CLI_MODEL_SET.has(mapped)) {
+		return mapped;
+	}
+	return null;
+}
+
 export const DEFAULT_GOVERNOR_THRESHOLDS = Object.freeze({
 	windowDurationMs: 7 * 24 * 60 * 60 * 1000,
 	conserveClaudeBand: Object.freeze({ enterAt: 0.70, exitBelow: 0.65 }),
@@ -587,14 +620,15 @@ export function parseTaskRequest(rawInput) {
 
 	let preferredModel;
 	if (rawInput.preferredModel !== undefined && rawInput.preferredModel !== null && rawInput.preferredModel !== "") {
-		if (!isAgyModelSlug(rawInput.preferredModel) && !isGeminiCliModelSlug(rawInput.preferredModel)) {
+		const resolved = resolveModelAlias(String(rawInput.preferredModel));
+		if (!resolved) {
 			return {
 				kind: "error",
 				code: "INVALID_REQUEST",
 				message: `Unsupported preferred model "${rawInput.preferredModel}".`,
 			};
 		}
-		preferredModel = rawInput.preferredModel;
+		preferredModel = resolved;
 	}
 
 	let preferredEffort;
@@ -683,9 +717,22 @@ export function parseAgyOutputJson(rawStdout) {
 		return { kind: "error", code: "INVALID_PROVIDER_JSON", message: "Empty stdout from agy CLI." };
 	}
 
+	let candidateJson = rawStdout.trim();
+	if (!candidateJson.startsWith("{")) {
+		const braceIdx = candidateJson.indexOf("\n{");
+		if (braceIdx >= 0) {
+			candidateJson = candidateJson.slice(braceIdx + 1).trim();
+		} else {
+			const firstBrace = candidateJson.indexOf("{");
+			if (firstBrace >= 0) {
+				candidateJson = candidateJson.slice(firstBrace).trim();
+			}
+		}
+	}
+
 	let parsed;
 	try {
-		parsed = JSON.parse(rawStdout.trim());
+		parsed = JSON.parse(candidateJson);
 	} catch (err) {
 		return {
 			kind: "error",
@@ -696,6 +743,16 @@ export function parseAgyOutputJson(rawStdout) {
 
 	if (!parsed || typeof parsed !== "object") {
 		return { kind: "error", code: "INVALID_PROVIDER_JSON", message: "agy JSON output is not an object." };
+	}
+
+	if (parsed.status === "ERROR" || (typeof parsed.error === "string" && parsed.error.trim().length > 0)) {
+		return {
+			kind: "error",
+			code: "INVALID_PROVIDER_JSON",
+			message: typeof parsed.error === "string" && parsed.error.trim().length > 0
+				? parsed.error.trim()
+				: "agy returned status ERROR.",
+		};
 	}
 
 	const responseText =

@@ -32,7 +32,9 @@ import {
 	parseRelativeGlob,
 	parseTaskRequest,
 	reconcileStaleWorktrees,
+	resolveModelAlias,
 	resolveRoutePlan,
+	startAnthropicGatewayServer,
 	tokenizeShellArgs,
 	transitionQuotaState,
 } from "../plugins/claugle/scripts/claugle.mjs";
@@ -880,5 +882,176 @@ describe("Markdown Documentation and Prompt Contracts", () => {
 			checkLinksOnDisk: false,
 		});
 		assert.deepEqual(seededMissingFrontmatter, ["missing name in frontmatter of SKILL.md"]);
+	});
+});
+
+describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
+	it("resolves argon/flash aliases, strips agy warning prefixes, and serves /v1/messages SSE, tool_use, and slash-command fast-paths", async () => {
+		assert.equal(resolveModelAlias("argon"), "gemini-4-argon-high");
+		assert.equal(resolveModelAlias("argon-medium"), "gemini-4-argon-medium");
+		assert.equal(resolveModelAlias("gemini-4-argon-high[1m]"), "gemini-4-argon-high");
+		assert.equal(resolveModelAlias("flash"), "gemini-3.8-flash-high");
+		assert.equal(resolveModelAlias("agy-opus"), "claude-opus-5-5-high");
+		assert.equal(resolveModelAlias("agy-sonnet"), "claude-sonnet-5-5-high");
+		assert.equal(resolveModelAlias("unknown-slug"), null);
+
+		const reqWithAlias = parseTaskRequest({
+			prompt: "Draft release notes",
+			preferredModel: "argon",
+		});
+		assert.equal(reqWithAlias.kind, "ok");
+		assert.equal(reqWithAlias.value.preferredModel, "gemini-4-argon-high");
+
+		const prefixedAgy = parseAgyOutputJson(
+			'warning: --mode plan has no effect while slash command expansion is disabled.\n{"conversation_id":"c1","status":"SUCCESS","response":"ok","usage":{"total_tokens":50}}'
+		);
+		assert.equal(prefixedAgy.kind, "ok");
+		assert.equal(prefixedAgy.value.response, "ok");
+
+		const errAgy = parseAgyOutputJson(
+			'{"conversation_id":"","status":"ERROR","response":"","error":"--model gemini-4-argon-high conflicts with --effort=medium"}'
+		);
+		assert.equal(errAgy.kind, "error");
+		assert.match(errAgy.message, /conflicts with --effort=medium/);
+
+		const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "claugle-gw-data-"));
+		const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "claugle-gw-bin-"));
+		const mockAgyPath = path.join(binDir, "mock-agy");
+		fs.writeFileSync(mockAgyPath, "#!/usr/bin/env node\nprocess.exit(0);\n", { mode: 0o755 });
+
+		const gw = await startAnthropicGatewayServer({
+			port: 0,
+			host: "127.0.0.1",
+			env: {
+				CLAUDE_PLUGIN_DATA: dataDir,
+				CLAUDE_PROJECT_DIR: process.cwd(),
+				CLAUGLE_AGY_BIN: mockAgyPath,
+			},
+			providerRunner: async (params) => {
+				return {
+					kind: "success",
+					durationMs: 12,
+					payload: {
+						conversationId: "conv-gw-1",
+						status: "SUCCESS",
+						response: JSON.stringify({
+							text: `응답 모델: ${params.modelSlug}`,
+							tool_calls: [],
+						}),
+						structuredOutput: {
+							text: `응답 모델: ${params.modelSlug}`,
+							tool_calls: [],
+						},
+						usage: {
+							inputTokens: 100,
+							outputTokens: 25,
+							thinkingTokens: 10,
+							cacheReadTokens: 0,
+							totalTokens: 135,
+						},
+					},
+				};
+			},
+		});
+
+		try {
+			const helloRes = await fetch(`${gw.url}/api/hello`, { method: "HEAD" });
+			assert.equal(helloRes.status, 200);
+
+			const countRes = await fetch(`${gw.url}/v1/messages/count_tokens?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ model: "argon", messages: [{ role: "user", content: "안녕" }] }),
+			});
+			const countJson = await countRes.json();
+			assert.ok(countJson.input_tokens > 0);
+
+			const msgRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "argon",
+					stream: false,
+					tools: [{ name: "Bash", description: "Run shell", input_schema: { type: "object" } }],
+					messages: [{ role: "user", content: "안녕하세요" }],
+				}),
+			});
+			const msgJson = await msgRes.json();
+			assert.equal(msgJson.model, "gemini-4-argon-high");
+			assert.equal(msgJson.stop_reason, "end_turn");
+			assert.equal(msgJson.content[0].text, "응답 모델: gemini-4-argon-high");
+
+			const sseRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "argon",
+					stream: true,
+					messages: [{ role: "user", content: "스트리밍 테스트" }],
+				}),
+			});
+			const sseText = await sseRes.text();
+			assert.match(sseText, /event: message_start/);
+			assert.match(sseText, /응답 모델: gemini-4-argon-high/);
+			assert.match(sseText, /event: message_stop/);
+
+			const slashTurn1 = await fetch(`${gw.url}/v1/messages?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "argon",
+					stream: false,
+					tools: [{ name: "Bash", description: "Run shell", input_schema: { type: "object" } }],
+					messages: [
+						{
+							role: "user",
+							content: 'Run claugle.mjs:\n```bash\nnode "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" quota\n```',
+						},
+					],
+				}),
+			});
+			const slashTurn1Json = await slashTurn1.json();
+			assert.equal(slashTurn1Json.stop_reason, "tool_use");
+			assert.equal(slashTurn1Json.content[0].type, "tool_use");
+			assert.equal(slashTurn1Json.content[0].name, "Bash");
+			assert.match(slashTurn1Json.content[0].input.command, /scripts\/claugle\.mjs" quota/);
+
+			const slashTurn2 = await fetch(`${gw.url}/v1/messages?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "argon",
+					stream: false,
+					tools: [{ name: "Bash", description: "Run shell", input_schema: { type: "object" } }],
+					messages: [
+						{
+							role: "user",
+							content: 'Run claugle.mjs:\n```bash\nnode "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" quota\n```',
+						},
+						{
+							role: "assistant",
+							content: slashTurn1Json.content,
+						},
+						{
+							role: "user",
+							content: [
+								{
+									type: "tool_result",
+									tool_use_id: slashTurn1Json.content[0].id,
+									content: '{"quotaState":"OVERFLOW_TO_AGY"}',
+								},
+							],
+						},
+					],
+				}),
+			});
+			const slashTurn2Json = await slashTurn2.json();
+			assert.equal(slashTurn2Json.stop_reason, "end_turn");
+			assert.equal(slashTurn2Json.content[0].text, '{"quotaState":"OVERFLOW_TO_AGY"}');
+		} finally {
+			gw.server.close();
+			fs.rmSync(dataDir, { recursive: true, force: true });
+			fs.rmSync(binDir, { recursive: true, force: true });
+		}
 	});
 });
