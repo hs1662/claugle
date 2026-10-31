@@ -274,6 +274,49 @@ export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], denyRea
 	return dir;
 }
 
+// Under claugle only Claude Code's harness may instruct the model. agy loads the user's global plugins,
+// MCP servers and hooks from ~/.gemini/config, so agy runs in a mirror of the home that links every
+// other entry (login, gcloud, git) but leaves those out, along with the plugin registry files agy
+// could rewrite through a link. Files agy itself creates there stay.
+const AGY_HOME_LAYOUT = Object.freeze({ ".gemini": { config: { hidden: ["plugins", "mcp_config.json", "hooks.json", "config.json", "import_manifest.json"] } } });
+
+function mirrorDir(src, dst, layout) {
+	fs.mkdirSync(dst, { recursive: true });
+	const hidden = new Set(layout.hidden ?? []);
+	let names = [];
+	try {
+		names = fs.readdirSync(src);
+	} catch {}
+	const wanted = new Set(names.filter((name) => !hidden.has(name)));
+	for (const name of wanted) {
+		const from = path.join(src, name);
+		const to = path.join(dst, name);
+		if (layout[name] && typeof layout[name] === "object" && !Array.isArray(layout[name])) {
+			mirrorDir(from, to, layout[name]);
+			continue;
+		}
+		const existing = fs.lstatSync(to, { throwIfNoEntry: false });
+		if (existing?.isSymbolicLink() && fs.readlinkSync(to) === from) continue;
+		if (existing && !existing.isSymbolicLink()) continue;
+		if (existing) fs.rmSync(to, { force: true });
+		try {
+			fs.symlinkSync(from, to);
+		} catch (err) {
+			if (err?.code !== "EEXIST") throw err;
+		}
+	}
+	for (const name of fs.readdirSync(dst)) {
+		const to = path.join(dst, name);
+		if (!wanted.has(name) && fs.lstatSync(to, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(to, { force: true });
+	}
+}
+
+export function prepareAgyHome(pluginDataDir, realHome = os.homedir()) {
+	const home = path.join(pluginDataDir, "agy-home");
+	mirrorDir(realHome, home, AGY_HOME_LAYOUT);
+	return home;
+}
+
 export function buildAgyCliArgs(invocation) {
 	if (!invocation || typeof invocation.prompt !== "string" || invocation.prompt.trim().length === 0) {
 		throw new Error("AgyCliInvocation requires a non-empty prompt.");
@@ -483,6 +526,7 @@ export function runHeadlessProvider(params) {
 				env: {
 					...process.env,
 					CLAUGLE_HEADLESS_SUBPROCESS: "1",
+					...(provider === "agy" && params.agyHome ? { HOME: params.agyHome } : {}),
 				},
 				stdio: [provider === "gemini-cli" ? "ignore" : "pipe", "pipe", "pipe"],
 				detached: true,
@@ -840,6 +884,7 @@ export async function executeRoutedTask(params) {
 				mode: candidate.agyMode,
 				cwd: projectDir,
 				addDirs: gateDir ? [gateDir] : undefined,
+				agyHome: candidate.provider === "agy" ? prepareAgyHome(env.pluginDataDir) : undefined,
 				hostRepoRoot: lease?.hostRepoRoot,
 				timeoutMs: candidate.timeoutMs,
 			});

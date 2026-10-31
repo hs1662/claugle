@@ -23,7 +23,7 @@ import {
 	resolveModelAndEffort,
 	resolveRoutePlan,
 } from "./policy-engine.mjs";
-import { detectProviderHealth, recordCircuitBreakerOpen, runHeadlessProvider, writeAgyToolGate } from "./provider-runner.mjs";
+import { detectProviderHealth, prepareAgyHome, recordCircuitBreakerOpen, runHeadlessProvider, writeAgyToolGate } from "./provider-runner.mjs";
 
 export const DEFAULT_GATEWAY_PORT = 18789;
 // Claude Code aborts a stream that stays silent for its idle timeout, which is at least 300 s.
@@ -990,6 +990,7 @@ export function startAnthropicGatewayServer({
 				effort: candidate.effort,
 				mode: "plan",
 				cwd: gatewayCwd,
+				agyHome: prepareAgyHome(env.pluginDataDir),
 				jsonSchema: hasTools && candidate.provider === "agy" ? GATEWAY_TURN_JSON_SCHEMA : undefined,
 				timeoutMs: Math.min(candidate.timeoutMs ?? 180_000, remainingMs),
 				signal: clientGone.signal,
