@@ -181,7 +181,11 @@ export function buildGeminiCliArgs(invocation) {
 
 function classifyProviderFailure(combinedOutput) {
 	const text = String(combinedOutput || "");
-	if (/quota[_\s-]*exhausted|resource_exhausted|weekly\s+limit|insufficient_quota|exceeded.*quota/i.test(text)) {
+	if (
+		/quota[_\s-]*exhausted|resource_exhausted|weekly\s+limit|5-hour\s+limit|session\s+limit|hit\s+your.*limit|insufficient_quota|exceeded.*quota/i.test(
+			text
+		)
+	) {
 		return "QUOTA_EXHAUSTED";
 	}
 	if (/rate[_\s-]*limit|too\s+many\s+requests|\b429\b/i.test(text)) {
@@ -407,7 +411,14 @@ export async function executeRoutedTask(params) {
 	const attemptedTargets = [];
 	const errors = [];
 
+	const hasExternalCandidate = plan.candidates.some(
+		(c) => c.provider !== "claude-native" && health[c.provider]?.kind === "healthy"
+	);
+
 	for (const candidate of plan.candidates) {
+		if (candidate.provider === "claude-native" && hasExternalCandidate) {
+			continue;
+		}
 		attemptedTargets.push(candidate);
 
 		if (candidate.provider === "claude-native") {

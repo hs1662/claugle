@@ -316,6 +316,14 @@ describe("Deterministic Task Classifier", () => {
 			classifyTask("Design the system architecture and RFC domain model trade-offs").taskKind,
 			"architecture"
 		);
+		assert.equal(classifyTask("릴리스 노트 초안 작성해줘").taskKind, "writing");
+		assert.equal(classifyTask("가이드 문서 수정해줘").taskKind, "docs");
+		assert.equal(classifyTask("일본어로 번역해줘").taskKind, "translation");
+		assert.equal(classifyTask("동작 원리 설명해줘").taskKind, "research");
+		assert.equal(classifyTask("변경사항 코드 리뷰해줘").taskKind, "review");
+		assert.equal(classifyTask("오타 수정해줘").taskKind, "coding-trivial");
+		assert.equal(classifyTask("동시성 레이스 컨디션 버그 수정해줘").taskKind, "coding-complex");
+		assert.equal(classifyTask("시스템 아키텍처와 도메인 모델 설계해줘").taskKind, "architecture");
 
 		const overridden = classifyTask("Random prompt text", "translation", false);
 		assert.equal(overridden.taskKind, "translation");

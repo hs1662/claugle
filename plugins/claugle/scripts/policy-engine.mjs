@@ -835,6 +835,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\blocaliz(e|ation)\b/i,
 			/\b(i18n|l10n)\b/i,
 			/\binto\s+(spanish|japanese|chinese|french|german|korean|portuguese|italian|english)\b/i,
+			/(번역|다국어|현지화|한글화|영문으로|한국어로|일본어로|중국어로)/,
 		],
 		defaultWrite: false,
 	},
@@ -846,6 +847,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\bsecurity\s+(audit|review)\b/i,
 			/\bfind\s+(bugs|vulnerabilities|regressions)\b/i,
 			/\baudit\s+(the|this)\b/i,
+			/(코드\s*리뷰|보안\s*감사|보안\s*검토|변경사항\s*검토|리뷰해|검토해|감사해)/,
 		],
 		defaultWrite: false,
 	},
@@ -856,6 +858,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\b(write|update|generate|edit|refresh)\s+(the\s+)?(docs|documentation|api\s+docs|guide|tutorial|readme)\b/i,
 			/\bdocument\s+(the|this|how)\b/i,
 			/\bdocs\/[a-z0-9_/-]+\.md\b/i,
+			/(문서화|문서\s*(작성|수정|갱신|업데이트|정리)|가이드\s*(작성|수정)|매뉴얼)/,
 		],
 		defaultWrite: false,
 	},
@@ -865,6 +868,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\b(release\s+notes|blog\s+post|announcement|commit\s+message|pr\s+description|pull\s+request\s+description)\b/i,
 			/\b(summarize|summary|tl;dr|rewrite\s+prose|copywriting|draft\s+an?\s+(email|post|message|note|summary))\b/i,
 			/\bwrite\s+a\s+(summary|post|essay|letter|description|announcement)\b/i,
+			/(릴리스\s*노트|블로그|공지사항|커밋\s*메시지|초안|요약해|글쓰기|문장\s*다듬|초안\s*작성)/,
 		],
 		defaultWrite: false,
 	},
@@ -874,6 +878,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\b(system\s+design|architecture|architectural|rfc|adr|design\s+doc)\b/i,
 			/\b(design|sketch)\s+(the\s+)?(types|schema|state\s+machine|domain\s+model|module\s+boundaries|api\s+contract)\b/i,
 			/\btrade-?offs?\s+between\b/i,
+			/(아키텍처|시스템\s*설계|도메인\s*모델|트레이드오프|구조\s*설계|인터페이스\s*설계)/,
 		],
 		defaultWrite: false,
 	},
@@ -883,6 +888,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\b(explain\s+how|how\s+does|why\s+does|investigate|research|survey|explore\s+how)\b/i,
 			/\bwhat\s+causes\b/i,
 			/\bwalk\s+me\s+through\b/i,
+			/(작동\s*방식|동작\s*원리|설명해|조사해|분석해|원인\s*파악)/,
 		],
 		defaultWrite: false,
 	},
@@ -891,6 +897,7 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 		patterns: [
 			/\b(rename|typo|format|prettier|eslint|lint\s+fix|bump\s+version|one-line|one\s+liner|simple\s+helper|update\s+constant)\b/i,
 			/\badd\s+an?\s+export\b/i,
+			/(오타\s*수정|이름\s*변경|포맷팅|린트\s*수정|버전\s*올리|상수\s*수정)/,
 		],
 		defaultWrite: true,
 	},
@@ -900,13 +907,14 @@ const TASK_CLASSIFICATION_RULES = Object.freeze([
 			/\b(refactor|implement|migrate|concurrency|race\s+condition|deadlock|state\s+machine|parser|compiler|algorithm)\b/i,
 			/\b(fix|debug)\s+(the\s+)?(bug|issue|error|crash|regression|test)\b/i,
 			/\bmulti-?file\b/i,
+			/(리팩토링|구현해|마이그레이션|동시성|레이스\s*컨디션|데드락|버그\s*수정|디버깅)/,
 		],
 		defaultWrite: true,
 	},
 ]);
 
 const WRITE_INTENT_PATTERN =
-	/\b(edit|modify|update|write\s+to|apply|refactor|implement|fix|rename|create\s+file|patch)\b/i;
+	/\b(edit|modify|update|write\s+to|apply|refactor|implement|fix|rename|create\s+file|patch)\b|(파일\s*수정|반영해|고쳐|적용해)/i;
 
 export function classifyTask(prompt, explicitTaskKind, allowFileEdits = false) {
 	const text = typeof prompt === "string" ? prompt.trim() : "";
@@ -972,6 +980,7 @@ export function transitionQuotaState(
 	const pools = metrics?.pools ?? {};
 
 	const claudeRatio = Number(pools["claude-code-native"]?.consumedRatio ?? 0);
+	const claudeRateLimitHits = Number(pools["claude-code-native"]?.rateLimitHitsInWindow ?? 0);
 	const agyClaudeRatio = Number(pools["agy-claude-pool"]?.consumedRatio ?? 0);
 	const agyGeminiRatio = Number(pools["agy-gemini-pool"]?.consumedRatio ?? 0);
 	const agyMaxRatio = Math.max(agyClaudeRatio, agyGeminiRatio);
@@ -986,9 +995,11 @@ export function transitionQuotaState(
 	}
 
 	const wasOverflowOrHigher = prev === "OVERFLOW_TO_AGY" || prev === "FALLBACK_GEMINI_CLI";
-	const inOverflow = wasOverflowOrHigher
-		? claudeRatio >= thresholds.overflowToAgyBand.exitBelow
-		: claudeRatio >= thresholds.overflowToAgyBand.enterAt;
+	const inOverflow =
+		claudeRateLimitHits > 0 ||
+		(wasOverflowOrHigher
+			? claudeRatio >= thresholds.overflowToAgyBand.exitBelow
+			: claudeRatio >= thresholds.overflowToAgyBand.enterAt);
 
 	if (inOverflow) {
 		return "OVERFLOW_TO_AGY";
