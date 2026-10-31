@@ -23,7 +23,7 @@ import {
 	resolveModelAndEffort,
 	resolveRoutePlan,
 } from "./policy-engine.mjs";
-import { detectProviderHealth, prepareAgyHome, recordCircuitBreakerOpen, runHeadlessProvider, writeAgyAgent, writeAgyToolGate } from "./provider-runner.mjs";
+import { detectProviderHealth, ensureOwnGitRepo, prepareAgyHome, recordCircuitBreakerOpen, runHeadlessProvider, writeAgyAgent, writeAgyToolGate } from "./provider-runner.mjs";
 
 export const DEFAULT_GATEWAY_PORT = 18789;
 // Claude Code aborts a stream that stays silent for its idle timeout, which is at least 300 s.
@@ -709,6 +709,7 @@ function prepareGatewayWorkspace(pluginDataDir) {
 		denyReason: "claugle gateway: agy tools are disabled. Return tool calls to Claude Code through tool_calls.",
 	});
 	writeAgyAgent(dir, "claugle-gateway");
+	ensureOwnGitRepo(dir);
 	return dir;
 }
 

@@ -274,6 +274,27 @@ export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], denyRea
 	return dir;
 }
 
+// agy walks up from each workspace root to the top of its git repo and loads every agy
+// customization folder on the way. A folder that is its own repo stops that walk; an empty .git
+// folder does not, so this runs a real `git init`.
+export function ensureOwnGitRepo(dir) {
+	const real = fs.realpathSync(dir);
+	const isTop = () => {
+		try {
+			return execFileSync("git", ["-C", real, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === real;
+		} catch {
+			return false;
+		}
+	};
+	if (isTop()) return;
+	try {
+		execFileSync("git", ["init", "-q", real], { stdio: "ignore" });
+	} catch {}
+	if (!isTop()) {
+		throw new Error(`claugle could not make ${real} its own git repository, so agy would load agy customizations from the folders above it. agy was not started.`);
+	}
+}
+
 // agy reads rules, skills, plugins, agents, workflows, sidecars, hooks and MCP servers from many
 // places under ~/.gemini (GEMINI.md and AGENTS.md, config/, antigravity-cli/hooks.json). So agy runs
 // in a home that holds only the login token, linked so that agy's token refreshes reach the real

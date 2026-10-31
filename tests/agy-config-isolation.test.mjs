@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { startAnthropicGatewayServer } from "../plugins/claugle/scripts/anthropic-gateway.mjs";
 import { parsePluginEnv, parseTaskRequest } from "../plugins/claugle/scripts/policy-engine.mjs";
 import { buildAgyCliArgs, executeRoutedTask, prepareAgyHome } from "../plugins/claugle/scripts/provider-runner.mjs";
 
@@ -203,5 +204,54 @@ describe("agy runs in a home that carries only the login token", () => {
 		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN), "a missing token link is linked again");
 
 		assert.deepEqual(snapshot(real), before);
+	});
+});
+
+const gitTop = (dir) => {
+	try {
+		return execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	} catch {
+		return null;
+	}
+};
+
+async function gatewayRequest(data, agy) {
+	const gw = await startAnthropicGatewayServer({
+		port: 0,
+		env: { pluginDataDir: data, pluginRoot: path.resolve("plugins/claugle"), projectDir: data, sessionId: "iso", weeklyBudgets: { "claude-code-native": 5e6, "agy-claude-pool": 8e6, "agy-gemini-pool": 15e6, "gemini-cli-pool": 1e7 }, agyBinOverride: agy },
+	});
+	try {
+		const res = await fetch(`${gw.url}/v1/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "gemini-4-argon", messages: [{ role: "user", content: "x" }] }) });
+		return { status: res.status, body: await res.json() };
+	} finally {
+		gw.server.close();
+	}
+}
+
+describe("the gateway runs agy in a workspace that is its own git repo", () => {
+	it("is a git top-level even when the plugin data folder sits inside another git repo", async () => {
+		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
+		const data = path.join(outer, "plugin-data");
+		fs.mkdirSync(data);
+		const agy = stubAgy(`record({ cwd: process.cwd(), top: cp.execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim() });
+process.stdout.write(JSON.stringify({ response: "ok", usage: {} }) + "\\n");`);
+		const res = await gatewayRequest(data, agy.file);
+		assert.equal(res.status, 200, JSON.stringify(res.body));
+		const seen = agy.recorded();
+		assert.equal(seen.cwd, path.join(data, "gateway-workspace"));
+		assert.equal(seen.top, seen.cwd);
+		assert.equal(gitTop(path.join(data, "gateway-workspace")), path.join(data, "gateway-workspace"));
+	});
+
+	it("refuses to start agy when the workspace cannot be made its own git repo", async () => {
+		const outer = gitRepo();
+		const data = path.join(outer, "plugin-data");
+		fs.mkdirSync(path.join(data, "gateway-workspace"), { recursive: true });
+		fs.writeFileSync(path.join(data, "gateway-workspace", ".git"), "not a git file\n");
+		const agy = stubAgy(`reply("ok");`);
+		const res = await gatewayRequest(data, agy.file);
+		assert.equal(res.status, 500, JSON.stringify(res.body));
+		assert.match(res.body.error.message, /git/);
+		assert.equal(agy.started(), false);
 	});
 });
