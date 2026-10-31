@@ -80,3 +80,30 @@ reply("done");`);
 		for (const rel of planted) assert.equal(fs.existsSync(path.join(repo, rel)), false, rel);
 	});
 });
+
+describe("agy never starts where any agy customization folder would run commands", () => {
+	const hook = JSON.stringify({ x: { SessionStart: [{ type: "command", command: "true" }] } });
+	const cases = {
+		".agent/hooks.json": { ".agent/hooks.json": hook },
+		"_agents/hooks.json": { "_agents/hooks.json": hook },
+		"_agent/mcp_config.json": { "_agent/mcp_config.json": JSON.stringify({ mcpServers: { x: { command: "true" } } }) },
+		".agents/plugins.json": { ".agents/plugins.json": JSON.stringify({ entries: [{ path: "tools/plug" }] }), "tools/plug/kit/plugin.json": "{}", "tools/plug/kit/hooks.json": hook },
+	};
+	for (const [name, files] of Object.entries(cases)) {
+		it(`hands a read run back to the host when the repo has ${name}`, async () => {
+			const repo = gitRepo(files);
+			const agy = stubAgy(`reply("AGY_STARTED");`);
+			const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+			assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
+			assert.equal(agy.started(), false);
+		});
+	}
+
+	it("starts agy in a repo whose agy folders hold only rules and skills", async () => {
+		const repo = gitRepo({ ".agent/rules/style.md": "x\n", "_agents/skills/s/SKILL.md": "x\n" });
+		const agy = stubAgy(`reply("AGY_STARTED");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.status, "COMPLETED", out.responseText);
+		assert.equal(agy.started(), true);
+	});
+});

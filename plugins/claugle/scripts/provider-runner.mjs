@@ -9,6 +9,7 @@ import {
 	loadRollingQuotaSnapshot,
 } from "./ledger-store.mjs";
 import {
+	AGY_WORKSPACE_DIRS,
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
 	HARNESS_CONFIG_NAMES,
@@ -753,9 +754,9 @@ function formatPromptWithContextFiles(request) {
 	return sections.join("\n");
 }
 
-// agy runs commands from a workspace's customizations: hooks.json files (including plugin hooks)
-// and MCP server configs under .agents, and Gemini extensions under .gemini. The PreToolUse gate
-// never sees those commands, so agy must not start in a workspace that has any of them.
+// agy runs commands from a workspace's customization folders: hooks.json files (plugin hooks
+// included), MCP server configs, and plugins found in place or registered in plugins.json. The
+// PreToolUse gate never sees those commands, so agy must not start in a workspace that has any of them.
 function findAgyCommandCustomization(workspaceDir) {
 	let top = path.parse(path.resolve(workspaceDir)).root;
 	try {
@@ -778,7 +779,7 @@ function findAgyCommandCustomization(workspaceDir) {
 			for (const entry of entries) {
 				const full = path.join(current, entry.name);
 				// A symlink could lead anywhere agy follows it, so it counts as a customization too.
-				if (entry.isSymbolicLink() || ["hooks.json", "mcp_config.json", "plugins"].includes(entry.name)) {
+				if (entry.isSymbolicLink() || ["hooks.json", "mcp_config.json", "plugins", "plugins.json"].includes(entry.name)) {
 					return full;
 				}
 				if (entry.isDirectory()) pending.push(full);
@@ -787,12 +788,11 @@ function findAgyCommandCustomization(workspaceDir) {
 		return null;
 	};
 	for (let dir = path.resolve(workspaceDir); ; dir = path.dirname(dir)) {
-		const agentsDir = path.join(dir, ".agents");
-		const found =
-			(fs.lstatSync(agentsDir, { throwIfNoEntry: false })?.isSymbolicLink() ? agentsDir : null) ??
-			commandRunning(agentsDir) ??
-			(fs.existsSync(path.join(dir, ".gemini", "extensions")) ? path.join(dir, ".gemini", "extensions") : null);
-		if (found) return found;
+		for (const name of AGY_WORKSPACE_DIRS) {
+			const customDir = path.join(dir, name);
+			const found = fs.lstatSync(customDir, { throwIfNoEntry: false })?.isSymbolicLink() ? customDir : commandRunning(customDir);
+			if (found) return found;
+		}
 		if (dir === path.resolve(top) || dir === path.dirname(dir)) return null;
 	}
 }
