@@ -52,6 +52,7 @@ claude plugin install claugle --marketplace https://github.com/hs1662/claugle.gi
 
 ### 2. 슬래시 커맨드 (`commands/*.md`)
 
+- `/claugle:model [model] [low|medium|high]`: 활성 모델 패밀리(`argon`, `flash`, `agy-opus`, `agy-sonnet`, `gpt-oss`, `gemini-pro`, `gemini-flash`, `auto`)와 추론 강도(`low`, `medium`, `high`)를 즉시 변경하고 Claude Code 기본 `/model` 선택 창 구성을 동기화합니다.
 - `/claugle:write [--model <slug>] [--allow-edits] [--glob <pattern>] <prompt>`: 문서 작성·번역·요약 작업을 Google AI Gemini 모델로 실행합니다.
 - `/claugle:review [--model <slug>] [--effort <level>] [--context <file>] <prompt>`: 지정한 파일이나 변경사항을 대상으로 읽기 전용 코드 리뷰를 수행합니다.
 - `/claugle:task [--model <slug>] [--effort <level>] [--kind <task-kind>] [--allow-edits] <prompt>`: 작업 종류나 모델·추론 강도를 직접 지정해 라우팅된 작업을 실행합니다.
@@ -67,6 +68,6 @@ claude plugin install claugle --marketplace https://github.com/hs1662/claugle.gi
 - `SessionStart`: 원장 및 워크트리 디렉토리를 준비하고 `CLAUDE_PLUGIN_DATA` 경로를 `CLAUDE_ENV_FILE`에 기록합니다. 이어서 14일 지난 샤드 파일과 2시간 지난 방치 워크트리를 정리하고 현재 할당량 요약을 세션 컨텍스트에 주입합니다.
 - `UserPromptSubmit`: 프롬프트가 들어오면 10ms 안에 정적 어휘 규칙으로 분류합니다. Google AI 모델에 적합한 작업이면 추천 MCP 도구와 서브에이전트 안내를 컨텍스트에 덧붙입니다.
 
-### 5. 로컬 `/v1/messages` 게이트웨이와 모델 별칭 (`scripts/anthropic-gateway.mjs`)
+### 5. 네이티브 `/model` 선택 창 연동과 로컬 게이트웨이 (`scripts/anthropic-gateway.mjs`)
 
-호스트 Anthropic 계정의 5시간 세션 한도가 바닥났을 때도 Claude Code 하네스를 멈추지 않고 쓸 수 있도록 로컬 HTTP 브리지(`127.0.0.1:18789`)를 내장했습니다. `SessionStart` 훅이나 `claugle gateway --daemon`이 백그라운드 데몬을 자동으로 띄우며 `~/.claude/settings.json`에 `"ANTHROPIC_BASE_URL": "http://127.0.0.1:18789"`와 `"model": "gemini-4-argon-high"`를 설정하면 `claude --model argon`, `claude --model flash`, `/model argon`, `/claugle:*` 슬래시 커맨드가 모두 Google AI 구독 풀 위에서 바로 동작합니다.
+Claude Code의 기본 `/model` 선택 창(`Alt+P`)에서 `agy` CLI처럼 위아래 방향키로 Gemini·Claude 모델 패밀리를 고르고 좌우 방향키(`←`/`→`)로 추론 강도(`Low`, `Medium`, `High`)를 조절할 수 있도록 `~/.claude/settings.json`의 `modelPicker`(`options` 및 `behavesAs`)와 `modelSettings`(`effortLevel`, `maxEffortLevel`)를 자동 구성합니다. 사용자가 `/model` 창이나 `/claugle:model`(`claugle model`)에서 선택한 `(model, output_config.effort)` 조합은 로컬 게이트웨이(`127.0.0.1:18789`)의 `resolveModelAndEffort`를 거쳐 정확한 `agy` 슬러그(`gemini-4-argon-low`, `gemini-4-argon-medium`, `gemini-4-argon-high` 등)로 실행됩니다.

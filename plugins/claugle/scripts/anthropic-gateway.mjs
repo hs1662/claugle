@@ -9,11 +9,14 @@ import { appendUsageEvent, loadRollingQuotaSnapshot } from "./ledger-store.mjs";
 import {
 	DEFAULT_POLICY_MATRIX,
 	MODEL_CAPABILITIES,
+	MODEL_FAMILY_CATALOG,
+	buildClaudeModelPickerConfig,
 	classifyTask,
 	createTaskExecutionId,
 	parsePluginEnv,
-	 parseTaskRequest,
+	parseTaskRequest,
 	resolveModelAlias,
+	resolveModelAndEffort,
 	resolveRoutePlan,
 } from "./policy-engine.mjs";
 import { detectProviderHealth, runHeadlessProvider } from "./provider-runner.mjs";
@@ -143,7 +146,7 @@ export function extractSlashCommandFastPath(body, pluginRoot) {
 	}
 
 	const rawSlashMatch =
-		/(?:^|\n)\s*\/claugle:(quota|explain|write|review|task)(?:\s+([^\n]+))?\s*$/.exec(
+		/(?:^|\n)\s*\/claugle:(quota|explain|write|review|task|model)(?:\s+([^\n]+))?\s*$/.exec(
 			combinedUserText.trim()
 		);
 	if (rawSlashMatch) {
@@ -171,23 +174,185 @@ export function extractSlashCommandFastPath(body, pluginRoot) {
 	return null;
 }
 
-function makeGatewayTarget(modelSlug) {
-	const cap = MODEL_CAPABILITIES[modelSlug];
+function makeGatewayTarget(modelSlug, effortOverride) {
+	const resolved = resolveModelAndEffort(
+		modelSlug,
+		effortOverride,
+		{ preferExplicitEffort: Boolean(effortOverride) }
+	);
+	const effectiveSlug = resolved?.modelSlug ?? modelSlug;
+	const cap = MODEL_CAPABILITIES[effectiveSlug];
 	if (!cap) return null;
 	return Object.freeze({
 		provider: cap.provider,
 		quotaPool: cap.quotaPool,
 		modelSlug: cap.slug,
 		family: cap.family,
-		effort: cap.defaultEffort,
+		effort: resolved?.effort ?? effortOverride ?? cap.defaultEffort,
 		agyMode: "plan",
 		isolation: Object.freeze({ kind: "read-only" }),
 		timeoutMs: 180_000,
 	});
 }
 
+export function readConfiguredModelEffort(
+	rawModel,
+	settingsPath = path.join(os.homedir(), ".claude", "settings.json")
+) {
+	try {
+		if (!fs.existsSync(settingsPath)) return undefined;
+		const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+		const cleaned = String(rawModel || "").trim().replace(/\[[^\]]+\]$/i, "");
+		const entry =
+			parsed?.modelSettings?.[cleaned] ??
+			parsed?.modelSettings?.[cleaned.toLowerCase()];
+		if (typeof entry?.effortLevel === "string" && entry.effortLevel.trim()) {
+			return entry.effortLevel.trim().toLowerCase();
+		}
+		if (typeof parsed?.effortLevel === "string" && parsed.effortLevel.trim()) {
+			return parsed.effortLevel.trim().toLowerCase();
+		}
+	} catch {
+		return undefined;
+	}
+	return undefined;
+}
+
+export function syncClaudeModelPickerSettings({
+	settingsPath = path.join(os.homedir(), ".claude", "settings.json"),
+	selectedModel,
+	selectedEffort,
+	gatewayUrl = `http://127.0.0.1:${DEFAULT_GATEWAY_PORT}`,
+} = {}) {
+	let current = {};
+	try {
+		if (fs.existsSync(settingsPath)) {
+			current = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+		}
+	} catch {
+		current = {};
+	}
+
+	const pickerConfig = buildClaudeModelPickerConfig();
+	const mergedModelSettings = {
+		...pickerConfig.modelSettings,
+		...(current.modelSettings && typeof current.modelSettings === "object"
+			? current.modelSettings
+			: {}),
+	};
+
+	for (const [key, defaults] of Object.entries(pickerConfig.modelSettings)) {
+		const existing = mergedModelSettings[key];
+		mergedModelSettings[key] = {
+			...(existing && typeof existing === "object" ? existing : {}),
+			effortLevel:
+				existing && typeof existing.effortLevel === "string"
+					? existing.effortLevel
+					: defaults.effortLevel,
+			maxEffortLevel: defaults.maxEffortLevel,
+		};
+	}
+
+	let activeFamilyOrModel =
+		typeof current.model === "string" && current.model.trim()
+			? current.model.trim()
+			: "gemini-4-argon";
+	let activeEffort =
+		mergedModelSettings[activeFamilyOrModel]?.effortLevel ?? "high";
+
+	if (selectedModel !== undefined && selectedModel !== null && String(selectedModel).trim() !== "") {
+		const resolved = resolveModelAndEffort(
+			String(selectedModel),
+			selectedEffort,
+			{ preferExplicitEffort: Boolean(selectedEffort) }
+		);
+		if (!resolved) {
+			return {
+				kind: "error",
+				message: `지원하지 않는 모델입니다: "${selectedModel}"`,
+			};
+		}
+		activeFamilyOrModel = resolved.familyId;
+		activeEffort = resolved.effort;
+		const maxEffort =
+			pickerConfig.modelSettings[activeFamilyOrModel]?.maxEffortLevel ?? "high";
+		mergedModelSettings[activeFamilyOrModel] = {
+			...(mergedModelSettings[activeFamilyOrModel] || {}),
+			effortLevel: activeEffort,
+			maxEffortLevel: maxEffort,
+		};
+		if (resolved.modelSlug) {
+			mergedModelSettings[resolved.modelSlug] = {
+				...(mergedModelSettings[resolved.modelSlug] || {}),
+				effortLevel: activeEffort,
+				maxEffortLevel: maxEffort,
+			};
+		}
+	} else if (selectedEffort !== undefined && selectedEffort !== null && String(selectedEffort).trim() !== "") {
+		const resolved = resolveModelAndEffort(
+			activeFamilyOrModel,
+			selectedEffort,
+			{ preferExplicitEffort: true }
+		);
+		if (resolved) {
+			activeFamilyOrModel = resolved.familyId;
+			activeEffort = resolved.effort;
+			const maxEffort =
+				pickerConfig.modelSettings[activeFamilyOrModel]?.maxEffortLevel ?? "high";
+			mergedModelSettings[activeFamilyOrModel] = {
+				...(mergedModelSettings[activeFamilyOrModel] || {}),
+				effortLevel: activeEffort,
+				maxEffortLevel: maxEffort,
+			};
+		}
+	}
+
+	const updated = {
+		...current,
+		env: {
+			...(current.env && typeof current.env === "object" ? current.env : {}),
+			ANTHROPIC_BASE_URL:
+				current.env?.ANTHROPIC_BASE_URL || gatewayUrl,
+			CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT: "1",
+			CLAUDE_CODE_ALWAYS_ENABLE_EFFORT: "1",
+		},
+		model: activeFamilyOrModel,
+		modelPicker: pickerConfig.modelPicker,
+		modelSettings: mergedModelSettings,
+	};
+
+	const parentDir = path.dirname(settingsPath);
+	fs.mkdirSync(parentDir, { recursive: true });
+	const tmpPath = `${settingsPath}.tmp-${process.pid}-${Date.now()}`;
+	fs.writeFileSync(tmpPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
+	fs.renameSync(tmpPath, settingsPath);
+
+	const effectiveResolved = resolveModelAndEffort(
+		activeFamilyOrModel,
+		activeEffort,
+		{ preferExplicitEffort: true }
+	);
+
+	return {
+		kind: "ok",
+		settingsPath,
+		activeModel: activeFamilyOrModel,
+		activeEffort,
+		resolvedModelSlug: effectiveResolved?.modelSlug ?? null,
+		routingMode: effectiveResolved?.mode ?? "pinned",
+		availableFamilies: MODEL_FAMILY_CATALOG.map((f) => ({
+			familyId: f.familyId,
+			label: f.label,
+			defaultEffort: f.defaultEffort,
+			supportedEfforts: f.supportedEfforts,
+			variantsByEffort: f.variantsByEffort,
+		})),
+	};
+}
+
 export function resolveGatewayCandidates({
 	rawModel,
+	rawEffort,
 	messages = [],
 	tools = [],
 	maxTokens = 4096,
@@ -201,13 +366,16 @@ export function resolveGatewayCandidates({
 		"claude-opus-5-5-high",
 	];
 
-	const resolvedAlias = resolveModelAlias(rawModel);
-	if (resolvedAlias) {
-		const orderedSlugs = [
-			resolvedAlias,
-			...fallbackSlugs.filter((s) => s !== resolvedAlias),
-		];
-		return orderedSlugs.map(makeGatewayTarget).filter(Boolean);
+	const resolvedSelection = resolveModelAndEffort(rawModel, rawEffort);
+	if (resolvedSelection && resolvedSelection.mode === "pinned" && resolvedSelection.modelSlug) {
+		const primaryTarget = makeGatewayTarget(
+			resolvedSelection.modelSlug,
+			resolvedSelection.effort
+		);
+		const backupTargets = fallbackSlugs
+			.filter((s) => s !== resolvedSelection.modelSlug)
+			.map((s) => makeGatewayTarget(s));
+		return [primaryTarget, ...backupTargets].filter(Boolean);
 	}
 
 	const modelLower = String(rawModel || "").toLowerCase();
@@ -558,6 +726,23 @@ export function startAnthropicGatewayServer({
 			return;
 		}
 
+		if (urlPath === "/v1/models" && req.method === "GET") {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					object: "list",
+					data: MODEL_FAMILY_CATALOG.map((entry) => ({
+						id: entry.familyId,
+						type: "model",
+						display_name: entry.label,
+						description: entry.description,
+						created_at: "2026-01-01T00:00:00Z",
+					})),
+				})
+			);
+			return;
+		}
+
 		let rawBody = "";
 		req.on("data", (chunk) => {
 			rawBody += chunk.toString("utf8");
@@ -586,13 +771,18 @@ export function startAnthropicGatewayServer({
 				return;
 			}
 
-			const requestedModel = String(body.model || "gemini-4-argon-high");
+			const requestedModel = String(body.model || "gemini-4-argon");
+			const requestedEffort =
+				body.output_config?.effort ??
+				body.thinking?.effort ??
+				readConfiguredModelEffort(requestedModel);
 			const stream = Boolean(body.stream);
 
 			const fastPath = extractSlashCommandFastPath(body, env.pluginRoot);
 			if (fastPath) {
+				const fastResolved = resolveModelAndEffort(requestedModel, requestedEffort);
 				const respParams = {
-					model: resolveModelAlias(requestedModel) || requestedModel,
+					model: fastResolved?.modelSlug || resolveModelAlias(requestedModel) || requestedModel,
 					text: fastPath.text,
 					toolCalls: fastPath.toolCalls,
 					inputTokens: 64,
@@ -616,6 +806,7 @@ export function startAnthropicGatewayServer({
 			const health = detectProviderHealth(env, nowMs);
 			const candidates = resolveGatewayCandidates({
 				rawModel: requestedModel,
+				rawEffort: requestedEffort,
 				messages: body.messages,
 				tools: body.tools,
 				maxTokens: body.max_tokens,

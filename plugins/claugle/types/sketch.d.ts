@@ -52,6 +52,44 @@ export type GeminiCliModelSlug =
 
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
+export type ModelFamilyId =
+	| "claugle-auto"
+	| "gemini-4-argon"
+	| "gemini-3.8-flash"
+	| "agy-opus-5-5"
+	| "agy-sonnet-5-5"
+	| "gpt-oss-120b"
+	| "gemini-2.5-pro"
+	| "gemini-2.5-flash";
+
+export interface ModelFamilyEntry {
+	readonly familyId: ModelFamilyId;
+	readonly label: string;
+	readonly description: string;
+	readonly behavesAs: "claude-opus-5-5" | "claude-sonnet-5-5";
+	readonly provider: "auto" | "agy" | "gemini-cli";
+	readonly defaultEffort: EffortLevel;
+	readonly maxEffortLevel: EffortLevel;
+	readonly supportedEfforts: readonly EffortLevel[];
+	readonly variantsByEffort: Readonly<
+		Partial<Record<EffortLevel, AgyModelSlug | GeminiCliModelSlug>>
+	>;
+}
+
+export interface ResolvedModelEffort {
+	readonly mode: "auto" | "pinned";
+	readonly familyId: ModelFamilyId;
+	readonly modelSlug: AgyModelSlug | GeminiCliModelSlug | null;
+	readonly effort: EffortLevel;
+}
+
+export interface ClaudeModelPickerOption {
+	readonly model: string;
+	readonly label: string;
+	readonly description: string;
+	readonly behavesAs: string;
+}
+
 export type AgyExecutionMode = "plan" | "accept-edits" | "auto";
 
 export type ProviderId = "claude-native" | "agy" | "gemini-cli";
@@ -326,11 +364,26 @@ export interface RoutedTaskOutcome {
 export declare const MODEL_CAPABILITIES: Readonly<
 	Record<AgyModelSlug | GeminiCliModelSlug, ModelCapability>
 >;
+export declare const MODEL_FAMILY_CATALOG: readonly ModelFamilyEntry[];
 export declare const DEFAULT_GOVERNOR_THRESHOLDS: GovernorThresholds;
 export declare const DEFAULT_POLICY_MATRIX: PolicyMatrix;
 
 export declare function isAgyModelSlug(value: unknown): value is AgyModelSlug;
 export declare function isGeminiCliModelSlug(value: unknown): value is GeminiCliModelSlug;
+export declare function resolveModelAlias(raw: unknown): AgyModelSlug | GeminiCliModelSlug | null;
+export declare function resolveModelAndEffort(
+	rawModel: unknown,
+	rawEffort?: unknown
+): ResolvedModelEffort | null;
+export declare function buildClaudeModelPickerConfig(): {
+	readonly modelPicker: {
+		readonly replaceBuiltInOptions: boolean;
+		readonly options: readonly ClaudeModelPickerOption[];
+	};
+	readonly modelSettings: Readonly<
+		Record<string, { readonly effortLevel: EffortLevel; readonly maxEffortLevel: EffortLevel }>
+	>;
+};
 export declare function isUnitIntervalRatio(value: unknown): value is UnitIntervalRatio;
 export declare function createTaskExecutionId(nowMs?: number, randomHex?: string): TaskExecutionId;
 export declare function parseAbsolutePath(raw: unknown): ParseResult<AbsolutePath>;

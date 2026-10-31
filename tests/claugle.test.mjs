@@ -12,9 +12,11 @@ import {
 	DEFAULT_POLICY_MATRIX,
 	MCP_TOOL_DEFINITIONS,
 	MODEL_CAPABILITIES,
+	MODEL_FAMILY_CATALOG,
 	acquireWorktreeLease,
 	appendUsageEvent,
 	buildAgyCliArgs,
+	buildClaudeModelPickerConfig,
 	classifyTask,
 	compactExpiredLedgerShards,
 	createTaskExecutionId,
@@ -33,8 +35,10 @@ import {
 	parseTaskRequest,
 	reconcileStaleWorktrees,
 	resolveModelAlias,
+	resolveModelAndEffort,
 	resolveRoutePlan,
 	startAnthropicGatewayServer,
+	syncClaudeModelPickerSettings,
 	tokenizeShellArgs,
 	transitionQuotaState,
 } from "../plugins/claugle/scripts/claugle.mjs";
@@ -838,6 +842,7 @@ describe("Markdown Documentation and Prompt Contracts", () => {
 			"plugins/claugle/agents/agy-reviewer.md",
 			"plugins/claugle/agents/gemini-writer.md",
 			"plugins/claugle/commands/explain.md",
+			"plugins/claugle/commands/model.md",
 			"plugins/claugle/commands/quota.md",
 			"plugins/claugle/commands/review.md",
 			"plugins/claugle/commands/task.md",
@@ -895,12 +900,55 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 		assert.equal(resolveModelAlias("agy-sonnet"), "claude-sonnet-5-5-high");
 		assert.equal(resolveModelAlias("unknown-slug"), null);
 
+		assert.equal(MODEL_FAMILY_CATALOG.length, 8);
+		const argonLow = resolveModelAndEffort("gemini-4-argon", "low");
+		assert.equal(argonLow.modelSlug, "gemini-4-argon-low");
+		assert.equal(argonLow.effort, "low");
+		assert.equal(argonLow.familyId, "gemini-4-argon");
+
+		const flashMed = resolveModelAndEffort("flash", "medium");
+		assert.equal(flashMed.modelSlug, "gemini-3.8-flash-medium");
+		assert.equal(flashMed.effort, "medium");
+
+		const opusLow = resolveModelAndEffort("agy-opus-5-5", "low");
+		assert.equal(opusLow.modelSlug, "claude-opus-5-5-low");
+		assert.equal(opusLow.effort, "low");
+
+		const autoMode = resolveModelAndEffort("claugle-auto", "medium");
+		assert.equal(autoMode.mode, "auto");
+		assert.equal(autoMode.modelSlug, null);
+
+		const pickerCfg = buildClaudeModelPickerConfig();
+		assert.equal(pickerCfg.modelPicker.replaceBuiltInOptions, true);
+		assert.ok(pickerCfg.modelPicker.options.length >= 20);
+		assert.equal(pickerCfg.modelSettings["gemini-4-argon"].effortLevel, "high");
+		assert.equal(pickerCfg.modelSettings["gpt-oss-120b"].maxEffortLevel, "medium");
+
+		const tmpSettingsDir = fs.mkdtempSync(path.join(os.tmpdir(), "claugle-settings-"));
+		const tmpSettingsPath = path.join(tmpSettingsDir, "settings.json");
+		const syncedSettings = syncClaudeModelPickerSettings({
+			settingsPath: tmpSettingsPath,
+			selectedModel: "argon",
+			selectedEffort: "low",
+		});
+		assert.equal(syncedSettings.kind, "ok");
+		assert.equal(syncedSettings.activeModel, "gemini-4-argon");
+		assert.equal(syncedSettings.activeEffort, "low");
+		assert.equal(syncedSettings.resolvedModelSlug, "gemini-4-argon-low");
+		const savedJson = JSON.parse(fs.readFileSync(tmpSettingsPath, "utf8"));
+		assert.equal(savedJson.model, "gemini-4-argon");
+		assert.equal(savedJson.modelSettings["gemini-4-argon"].effortLevel, "low");
+		assert.equal(savedJson.modelPicker.replaceBuiltInOptions, true);
+		fs.rmSync(tmpSettingsDir, { recursive: true, force: true });
+
 		const reqWithAlias = parseTaskRequest({
 			prompt: "Draft release notes",
 			preferredModel: "argon",
+			preferredEffort: "low",
 		});
 		assert.equal(reqWithAlias.kind, "ok");
-		assert.equal(reqWithAlias.value.preferredModel, "gemini-4-argon-high");
+		assert.equal(reqWithAlias.value.preferredModel, "gemini-4-argon-low");
+		assert.equal(reqWithAlias.value.preferredEffort, "low");
 
 		const prefixedAgy = parseAgyOutputJson(
 			'warning: --mode plan has no effect while slash command expansion is disabled.\n{"conversation_id":"c1","status":"SUCCESS","response":"ok","usage":{"total_tokens":50}}'
@@ -980,6 +1028,24 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 			assert.equal(msgJson.model, "gemini-4-argon-high");
 			assert.equal(msgJson.stop_reason, "end_turn");
 			assert.equal(msgJson.content[0].text, "응답 모델: gemini-4-argon-high");
+
+			const effortRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "gemini-4-argon",
+					output_config: { effort: "low" },
+					stream: false,
+					messages: [{ role: "user", content: "저강도 테스트" }],
+				}),
+			});
+			const effortJson = await effortRes.json();
+			assert.equal(effortJson.model, "gemini-4-argon-low");
+			assert.equal(effortJson.content[0].text, "응답 모델: gemini-4-argon-low");
+
+			const modelsRes = await fetch(`${gw.url}/v1/models`, { method: "GET" });
+			const modelsJson = await modelsRes.json();
+			assert.equal(modelsJson.data.length, 8);
 
 			const sseRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
 				method: "POST",

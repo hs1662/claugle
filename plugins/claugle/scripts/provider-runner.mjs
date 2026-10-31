@@ -16,6 +16,7 @@ import {
 	parseGeminiCliOutputJson,
 	parsePluginEnv,
 	parseTaskRequest,
+	resolveModelAndEffort,
 	resolveRoutePlan,
 } from "./policy-engine.mjs";
 import {
@@ -143,15 +144,22 @@ export function buildAgyCliArgs(invocation) {
 	if (!invocation || typeof invocation.prompt !== "string" || invocation.prompt.trim().length === 0) {
 		throw new Error("AgyCliInvocation requires a non-empty prompt.");
 	}
+	const resolved = resolveModelAndEffort(
+		invocation.modelSlug,
+		invocation.effort,
+		{ preferExplicitEffort: Boolean(invocation.effort) }
+	);
+	const effectiveModelSlug = resolved?.modelSlug ?? invocation.modelSlug;
 	const effectiveEffort =
-		MODEL_CAPABILITIES[invocation.modelSlug]?.defaultEffort ??
+		resolved?.effort ??
+		MODEL_CAPABILITIES[effectiveModelSlug]?.defaultEffort ??
 		invocation.effort ??
 		"high";
 	const args = [
 		"-p",
 		invocation.prompt,
 		"--model",
-		invocation.modelSlug,
+		effectiveModelSlug,
 		"--effort",
 		effectiveEffort,
 		"--output-format",

@@ -180,6 +180,150 @@ const GEMINI_CLI_MODEL_SET = new Set(
 		.map((cap) => cap.slug)
 );
 
+export const MODEL_FAMILY_CATALOG = Object.freeze([
+	Object.freeze({
+		familyId: "gemini-4-argon",
+		label: "Gemini 4 Argon (Google AI)",
+		description: "Google AI Ultra · 심층 추론, 아키텍처, 기술 문서 집필 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-opus-5-5",
+		provider: "agy",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({
+			low: "gemini-4-argon-low",
+			medium: "gemini-4-argon-medium",
+			high: "gemini-4-argon-high",
+		}),
+	}),
+	Object.freeze({
+		familyId: "gemini-3.8-flash",
+		label: "Gemini 3.8 Flash (Google AI)",
+		description: "Google AI · 고속 탐색, 다국어 번역, 요약, 단순 수정 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-sonnet-5-5",
+		provider: "agy",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({
+			low: "gemini-3.8-flash-low",
+			medium: "gemini-3.8-flash-medium",
+			high: "gemini-3.8-flash-high",
+		}),
+	}),
+	Object.freeze({
+		familyId: "agy-opus-5-5",
+		label: "Claude Opus 5.5 (Google AI Pool)",
+		description: "Antigravity Claude 풀 · 다중 파일 구현, 심층 디버깅 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-opus-5-5",
+		provider: "agy",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({
+			low: "claude-opus-5-5-low",
+			medium: "claude-opus-5-5-medium",
+			high: "claude-opus-5-5-high",
+		}),
+	}),
+	Object.freeze({
+		familyId: "agy-sonnet-5-5",
+		label: "Claude Sonnet 5.5 (Google AI Pool)",
+		description: "Antigravity Claude 풀 · 정밀 코드 리뷰, 빠른 구현 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-sonnet-5-5",
+		provider: "agy",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({
+			low: "claude-sonnet-5-5-low",
+			medium: "claude-sonnet-5-5-medium",
+			high: "claude-sonnet-5-5-high",
+		}),
+	}),
+	Object.freeze({
+		familyId: "gpt-oss-120b",
+		label: "GPT-OSS 120B (Google AI)",
+		description: "Google AI 오픈웨이트 · 경량 코딩 및 리서치 백업 · Medium 강도",
+		behavesAs: "claude-sonnet-5-5",
+		provider: "agy",
+		defaultEffort: "medium",
+		maxEffortLevel: "medium",
+		supportedEfforts: Object.freeze(["medium"]),
+		variantsByEffort: Object.freeze({
+			low: "gpt-oss-120b-medium",
+			medium: "gpt-oss-120b-medium",
+			high: "gpt-oss-120b-medium",
+		}),
+	}),
+	Object.freeze({
+		familyId: "gemini-2.5-pro",
+		label: "Gemini 2.5 Pro (Gemini CLI)",
+		description: "독립 Gemini CLI 풀 · 장문 독해, 리서치, 번역 폴백",
+		behavesAs: "claude-opus-5-5",
+		provider: "gemini-cli",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({
+			low: "gemini-2.5-pro",
+			medium: "gemini-2.5-pro",
+			high: "gemini-2.5-pro",
+		}),
+	}),
+	Object.freeze({
+		familyId: "gemini-2.5-flash",
+		label: "Gemini 2.5 Flash (Gemini CLI)",
+		description: "독립 Gemini CLI 풀 · 초고속 요약, 번역, 문서 보조",
+		behavesAs: "claude-sonnet-5-5",
+		provider: "gemini-cli",
+		defaultEffort: "medium",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({
+			low: "gemini-2.5-flash",
+			medium: "gemini-2.5-flash",
+			high: "gemini-2.5-flash",
+		}),
+	}),
+	Object.freeze({
+		familyId: "claugle-auto",
+		label: "claugle 자동 라우터 (Auto)",
+		description: "작업 유형(8종)과 주간 할당량 상태(4단계)에 맞춰 최적 모델과 강도를 자동 배정",
+		behavesAs: "claude-opus-5-5",
+		provider: "auto",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({}),
+	}),
+]);
+
+const FAMILY_BY_ID = new Map(
+	MODEL_FAMILY_CATALOG.map((entry) => [entry.familyId, entry])
+);
+
+const FAMILY_ALIAS_MAP = Object.freeze({
+	auto: "claugle-auto",
+	"claugle-auto": "claugle-auto",
+	argon: "gemini-4-argon",
+	"gemini-4-argon": "gemini-4-argon",
+	flash: "gemini-3.8-flash",
+	"gemini-3.8-flash": "gemini-3.8-flash",
+	"agy-opus": "agy-opus-5-5",
+	"agy-opus-5-5": "agy-opus-5-5",
+	"claude-opus-5-5": "agy-opus-5-5",
+	"agy-sonnet": "agy-sonnet-5-5",
+	"agy-sonnet-5-5": "agy-sonnet-5-5",
+	"claude-sonnet-5-5": "agy-sonnet-5-5",
+	"gpt-oss": "gpt-oss-120b",
+	"gpt-oss-120b": "gpt-oss-120b",
+	"gemini-2.5-pro": "gemini-2.5-pro",
+	"gemini-pro": "gemini-2.5-pro",
+	"gemini-2.5-flash": "gemini-2.5-flash",
+	"gemini-flash": "gemini-2.5-flash",
+});
+
 export const MODEL_ALIAS_MAP = Object.freeze({
 	argon: "gemini-4-argon-high",
 	"argon-high": "gemini-4-argon-high",
@@ -192,15 +336,29 @@ export const MODEL_ALIAS_MAP = Object.freeze({
 	"flash-low": "gemini-3.8-flash-low",
 	"gemini-3.8-flash": "gemini-3.8-flash-high",
 	"agy-opus": "claude-opus-5-5-high",
+	"agy-opus-5-5": "claude-opus-5-5-high",
 	"agy-opus-high": "claude-opus-5-5-high",
 	"agy-opus-medium": "claude-opus-5-5-medium",
 	"agy-opus-low": "claude-opus-5-5-low",
 	"agy-sonnet": "claude-sonnet-5-5-high",
+	"agy-sonnet-5-5": "claude-sonnet-5-5-high",
 	"agy-sonnet-high": "claude-sonnet-5-5-high",
 	"agy-sonnet-medium": "claude-sonnet-5-5-medium",
 	"agy-sonnet-low": "claude-sonnet-5-5-low",
 	"gpt-oss": "gpt-oss-120b-medium",
+	"gpt-oss-120b": "gpt-oss-120b-medium",
+	"gemini-pro": "gemini-2.5-pro",
+	"gemini-flash": "gemini-2.5-flash",
 });
+
+function normalizeEffortTier(rawEffort, fallback = "high") {
+	if (typeof rawEffort !== "string") return fallback;
+	const cleaned = rawEffort.trim().toLowerCase();
+	if (cleaned === "low") return "low";
+	if (cleaned === "medium" || cleaned === "med") return "medium";
+	if (cleaned === "high" || cleaned === "xhigh" || cleaned === "max") return "high";
+	return fallback;
+}
 
 export function resolveModelAlias(rawModel) {
 	if (typeof rawModel !== "string") return null;
@@ -211,6 +369,201 @@ export function resolveModelAlias(rawModel) {
 		return mapped;
 	}
 	return null;
+}
+
+export function resolveModelAndEffort(rawModel, rawEffort, options = {}) {
+	if (typeof rawModel !== "string") return null;
+	const cleaned = rawModel.trim().replace(/\[[^\]]+\]$/i, "").toLowerCase();
+	if (!cleaned) return null;
+
+	const preferExplicitEffort = Boolean(options?.preferExplicitEffort);
+	const hasExplicitEffort =
+		typeof rawEffort === "string" && rawEffort.trim().length > 0;
+
+	const directFamilyId = FAMILY_ALIAS_MAP[cleaned];
+	if (directFamilyId) {
+		const family = FAMILY_BY_ID.get(directFamilyId);
+		const effort = normalizeEffortTier(rawEffort, family.defaultEffort);
+		if (family.provider === "auto") {
+			return {
+				mode: "auto",
+				familyId: family.familyId,
+				modelSlug: null,
+				effort,
+			};
+		}
+		const clampedEffort = family.supportedEfforts.includes(effort)
+			? effort
+			: family.defaultEffort;
+		const modelSlug =
+			family.variantsByEffort[clampedEffort] ??
+			family.variantsByEffort[family.defaultEffort];
+		return {
+			mode: "pinned",
+			familyId: family.familyId,
+			modelSlug,
+			effort: clampedEffort,
+		};
+	}
+
+	const mappedSlug = MODEL_ALIAS_MAP[cleaned] ?? cleaned;
+	if (!AGY_MODEL_SET.has(mappedSlug) && !GEMINI_CLI_MODEL_SET.has(mappedSlug)) {
+		return null;
+	}
+
+	const matchingFamily = MODEL_FAMILY_CATALOG.find((entry) =>
+		Object.values(entry.variantsByEffort).includes(mappedSlug)
+	);
+	const cap = MODEL_CAPABILITIES[mappedSlug];
+	const slugEffort = cap?.defaultEffort ?? "high";
+
+	if (matchingFamily && preferExplicitEffort && hasExplicitEffort) {
+		const requestedTier = normalizeEffortTier(rawEffort, slugEffort);
+		const clampedEffort = matchingFamily.supportedEfforts.includes(requestedTier)
+			? requestedTier
+			: matchingFamily.defaultEffort;
+		const variantSlug =
+			matchingFamily.variantsByEffort[clampedEffort] ?? mappedSlug;
+		return {
+			mode: "pinned",
+			familyId: matchingFamily.familyId,
+			modelSlug: variantSlug,
+			effort: clampedEffort,
+		};
+	}
+
+	return {
+		mode: "pinned",
+		familyId: matchingFamily?.familyId ?? "gemini-4-argon",
+		modelSlug: mappedSlug,
+		effort: slugEffort,
+	};
+}
+
+export function buildClaudeModelPickerConfig() {
+	const options = [];
+	const modelSettings = {};
+
+	for (const family of MODEL_FAMILY_CATALOG) {
+		options.push({
+			model: family.familyId,
+			label: family.label,
+			description: family.description,
+			behavesAs: family.behavesAs,
+		});
+		modelSettings[family.familyId] = {
+			effortLevel: family.defaultEffort,
+			maxEffortLevel: family.maxEffortLevel,
+		};
+	}
+
+	const explicitVariants = [
+		{
+			model: "gemini-4-argon-high",
+			label: "Gemini 4 Argon · High",
+			description: "Google AI Ultra · 최고 추론 강도 고정",
+			behavesAs: "claude-opus-5-5",
+			effortLevel: "high",
+		},
+		{
+			model: "gemini-4-argon-medium",
+			label: "Gemini 4 Argon · Medium",
+			description: "Google AI Ultra · 균형 추론 강도 고정",
+			behavesAs: "claude-opus-5-5",
+			effortLevel: "medium",
+		},
+		{
+			model: "gemini-4-argon-low",
+			label: "Gemini 4 Argon · Low",
+			description: "Google AI Ultra · 고속 추론 강도 고정",
+			behavesAs: "claude-opus-5-5",
+			effortLevel: "low",
+		},
+		{
+			model: "gemini-3.8-flash-high",
+			label: "Gemini 3.8 Flash · High",
+			description: "Google AI · Flash 심층 추론 강도 고정",
+			behavesAs: "claude-sonnet-5-5",
+			effortLevel: "high",
+		},
+		{
+			model: "gemini-3.8-flash-medium",
+			label: "Gemini 3.8 Flash · Medium",
+			description: "Google AI · Flash 균형 추론 강도 고정",
+			behavesAs: "claude-sonnet-5-5",
+			effortLevel: "medium",
+		},
+		{
+			model: "gemini-3.8-flash-low",
+			label: "Gemini 3.8 Flash · Low",
+			description: "Google AI · Flash 초고속 추론 강도 고정",
+			behavesAs: "claude-sonnet-5-5",
+			effortLevel: "low",
+		},
+		{
+			model: "claude-opus-5-5-high",
+			label: "Claude Opus 5.5 (Google AI) · High",
+			description: "Antigravity Claude 풀 · Opus 최고 추론 강도 고정",
+			behavesAs: "claude-opus-5-5",
+			effortLevel: "high",
+		},
+		{
+			model: "claude-opus-5-5-medium",
+			label: "Claude Opus 5.5 (Google AI) · Medium",
+			description: "Antigravity Claude 풀 · Opus 균형 추론 강도 고정",
+			behavesAs: "claude-opus-5-5",
+			effortLevel: "medium",
+		},
+		{
+			model: "claude-opus-5-5-low",
+			label: "Claude Opus 5.5 (Google AI) · Low",
+			description: "Antigravity Claude 풀 · Opus 고속 추론 강도 고정",
+			behavesAs: "claude-opus-5-5",
+			effortLevel: "low",
+		},
+		{
+			model: "claude-sonnet-5-5-high",
+			label: "Claude Sonnet 5.5 (Google AI) · High",
+			description: "Antigravity Claude 풀 · Sonnet 최고 추론 강도 고정",
+			behavesAs: "claude-sonnet-5-5",
+			effortLevel: "high",
+		},
+		{
+			model: "claude-sonnet-5-5-medium",
+			label: "Claude Sonnet 5.5 (Google AI) · Medium",
+			description: "Antigravity Claude 풀 · Sonnet 균형 추론 강도 고정",
+			behavesAs: "claude-sonnet-5-5",
+			effortLevel: "medium",
+		},
+		{
+			model: "claude-sonnet-5-5-low",
+			label: "Claude Sonnet 5.5 (Google AI) · Low",
+			description: "Antigravity Claude 풀 · Sonnet 고속 추론 강도 고정",
+			behavesAs: "claude-sonnet-5-5",
+			effortLevel: "low",
+		},
+	];
+
+	for (const item of explicitVariants) {
+		options.push({
+			model: item.model,
+			label: item.label,
+			description: item.description,
+			behavesAs: item.behavesAs,
+		});
+		modelSettings[item.model] = {
+			effortLevel: item.effortLevel,
+			maxEffortLevel: "high",
+		};
+	}
+
+	return {
+		modelPicker: {
+			replaceBuiltInOptions: true,
+			options,
+		},
+		modelSettings,
+	};
 }
 
 export const DEFAULT_GOVERNOR_THRESHOLDS = Object.freeze({
@@ -562,8 +915,9 @@ export function parsePluginEnv(rawEnv = process.env) {
 	);
 	if (geminiCliBudget.kind === "error") return geminiCliBudget;
 
-	const rawDefaultMode =
+	const rawModeInput =
 		rawEnv.CLAUDE_PLUGIN_OPTION_DEFAULT_AGY_MODE ?? rawEnv.CLAUGLE_DEFAULT_AGY_MODE ?? "accept-edits";
+	const rawDefaultMode = rawModeInput === "agent" ? "accept-edits" : rawModeInput;
 	if (!AGY_EXECUTION_MODES.includes(rawDefaultMode)) {
 		return {
 			kind: "error",
@@ -618,19 +972,6 @@ export function parseTaskRequest(rawInput) {
 		explicitTaskKind = rawInput.explicitTaskKind;
 	}
 
-	let preferredModel;
-	if (rawInput.preferredModel !== undefined && rawInput.preferredModel !== null && rawInput.preferredModel !== "") {
-		const resolved = resolveModelAlias(String(rawInput.preferredModel));
-		if (!resolved) {
-			return {
-				kind: "error",
-				code: "INVALID_REQUEST",
-				message: `Unsupported preferred model "${rawInput.preferredModel}".`,
-			};
-		}
-		preferredModel = resolved;
-	}
-
 	let preferredEffort;
 	if (rawInput.preferredEffort !== undefined && rawInput.preferredEffort !== null && rawInput.preferredEffort !== "") {
 		if (!EFFORT_LEVELS.includes(rawInput.preferredEffort)) {
@@ -641,6 +982,26 @@ export function parseTaskRequest(rawInput) {
 			};
 		}
 		preferredEffort = rawInput.preferredEffort;
+	}
+
+	let preferredModel;
+	if (rawInput.preferredModel !== undefined && rawInput.preferredModel !== null && rawInput.preferredModel !== "") {
+		const resolved = resolveModelAndEffort(
+			String(rawInput.preferredModel),
+			preferredEffort,
+			{ preferExplicitEffort: Boolean(preferredEffort) }
+		);
+		if (!resolved || !resolved.modelSlug) {
+			return {
+				kind: "error",
+				code: "INVALID_REQUEST",
+				message: `Unsupported preferred model "${rawInput.preferredModel}".`,
+			};
+		}
+		preferredModel = resolved.modelSlug;
+		if (preferredEffort) {
+			preferredEffort = resolved.effort;
+		}
 	}
 
 	const cwdRes = parseAbsolutePath(rawInput.cwd ?? process.cwd());

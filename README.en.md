@@ -38,9 +38,9 @@ Choose any of the three invocation paths depending on your workflow.
 | Entry point | Names | Purpose |
 |---|---|---|
 | **Stdio MCP tools** | `claugle_write`, `claugle_review`, `claugle_run`, `claugle_quota` | Direct JSON-RPC 2.0 calls from Claude without subagent turn overhead |
-| **Slash commands** | `/claugle:write`, `/claugle:review`, `/claugle:task`, `/claugle:quota`, `/claugle:explain` | Explicit user commands for delegating tasks or inspecting routing plans and 7-day usage |
+| **Slash commands** | `/claugle:model`, `/claugle:write`, `/claugle:review`, `/claugle:task`, `/claugle:quota`, `/claugle:explain` | Explicit user commands for switching model and effort, delegating tasks, or inspecting routing plans and 7-day usage |
 | **Forwarding subagents** | `claugle:gemini-writer`, `claugle:agy-coder`, `claugle:agy-reviewer` | Single-command `Bash` forwarders that keep the host session from pre-reading repository files |
-| **Local `/v1/messages` gateway** | `claugle gateway --daemon`, `claude --model argon` | Runs a local Anthropic Messages API bridge on `http://127.0.0.1:18789` so the `claude` CLI and `/claugle:*` commands keep working on `argon` (`gemini-4-argon-high`) even when the 5-hour host session quota is exhausted |
+| **Native `/model` picker and gateway** | `/model` (`Alt+P`), `claugle model`, `claugle gateway --daemon` | Populates Claude Code's built-in `/model` picker with Google AI Gemini and Claude families plus inline `Left`/`Right` effort selection (`Low`/`Medium`/`High`) on `http://127.0.0.1:18789` |
 
 ## Repository layout and verification
 
