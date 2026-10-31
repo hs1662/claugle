@@ -16,7 +16,7 @@ import {
 } from "../plugins/claugle/scripts/provider-runner.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../plugins/claugle");
-const TOOL_CATEGORIES = ["write_file", "command", "browser", "mcp", "subagent", "url", "read_url"];
+const TOOL_CATEGORIES = ["write_file", "command", "mcp", "read_url", "execute_url", "unsandboxed"];
 
 const createdDirs = [];
 after(() => {
@@ -138,7 +138,7 @@ function settleWithin(promise, ms) {
 }
 
 describe("delegated agy runs are bound by deny rules", () => {
-	it("a read-only run cannot write, and every run denies commands, browser, MCP, subagents and URLs", async () => {
+	it("a read-only run cannot write, and every run denies commands, MCP, URLs and unsandboxed runs", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`write("agy-wrote.txt", "agy wrote this\\n"); reply("ok");`);
 
