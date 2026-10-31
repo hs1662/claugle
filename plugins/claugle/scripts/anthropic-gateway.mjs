@@ -994,7 +994,7 @@ export function startAnthropicGatewayServer({
 				cwd: gatewayCwd,
 				agyHome: prepareAgyHome(env.pluginDataDir),
 				agent: "claugle-gateway",
-				jsonSchema: hasTools && candidate.provider === "agy" ? GATEWAY_TURN_JSON_SCHEMA : undefined,
+				jsonSchema: hasTools ? GATEWAY_TURN_JSON_SCHEMA : undefined,
 				timeoutMs: Math.min(candidate.timeoutMs ?? 180_000, remainingMs),
 				signal: clientGone.signal,
 			});
@@ -1031,10 +1031,7 @@ export function startAnthropicGatewayServer({
 				continue;
 			}
 
-			const parsedOut = parseStructuredGatewayOutput(
-				execResult.payload,
-				Boolean(hasTools && candidate.provider === "agy")
-			);
+			const parsedOut = parseStructuredGatewayOutput(execResult.payload, hasTools);
 			const isEmpty = !parsedOut.text.trim() && parsedOut.toolCalls.length === 0;
 			appendUsageEvent({
 				pluginDataDir: env.pluginDataDir,
