@@ -255,3 +255,37 @@ process.stdout.write(JSON.stringify({ response: "ok", usage: {} }) + "\\n");`);
 		assert.equal(agy.started(), false);
 	});
 });
+
+describe("delegated runs hand agy a gate folder that is its own git repo", () => {
+	it("is a git top-level even when the plugin data folder sits inside another git repo", async () => {
+		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
+		const data = path.join(outer, "plugin-data");
+		fs.mkdirSync(data);
+		const repo = gitRepo();
+		const agy = stubAgy(`record({ root: addDirs[0], top: cp.execFileSync("git", ["-C", addDirs[0], "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim() });
+reply("ok");`);
+		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: data, CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env });
+		assert.equal(out.status, "COMPLETED", out.responseText);
+		const seen = agy.recorded();
+		assert.ok(seen.root.startsWith(path.join(data, "agy-gates")), seen.root);
+		assert.equal(seen.top, seen.root);
+	});
+
+	it("hands the run back to the host when git is missing", async () => {
+		const project = tmp("claugle-iso-nogit-");
+		const agy = stubAgy(`reply("AGY_STARTED");`);
+		const bin = tmp("claugle-iso-path-");
+		fs.symlinkSync(process.execPath, path.join(bin, "node"));
+		const savedPath = process.env.PATH;
+		process.env.PATH = bin;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: project }).value, env: envFor(project, agy.file) });
+		} finally {
+			process.env.PATH = savedPath;
+		}
+		assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
+		assert.equal(agy.started(), false);
+	});
+});

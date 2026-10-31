@@ -948,6 +948,14 @@ export async function executeRoutedTask(params) {
 				: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,
 		});
 		const agyAgent = writeAgyAgent(gateDir, lease ? "claugle-editor" : "claugle-reader", projectDir);
+		try {
+			ensureOwnGitRepo(gateDir);
+		} catch (err) {
+			fs.rmSync(gateDir, { recursive: true, force: true });
+			if (lease) abortWorktreeLease(lease);
+			errors.push(`${candidate.modelSlug}: ${errorMessage(err)}`);
+			continue;
+		}
 		let execResult;
 		try {
 			execResult = await runHeadlessProvider({
