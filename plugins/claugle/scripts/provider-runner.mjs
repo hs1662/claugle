@@ -122,7 +122,7 @@ function readOpenCircuit(pluginDataDir, provider, quotaPool, nowMs) {
 	return null;
 }
 
-function providerHealth(provider, desiredBin, pluginDataDir, nowMs) {
+function healthOf(provider, desiredBin, pluginDataDir, nowMs) {
 	const binaryPath = resolveExecutableInPath(desiredBin);
 	if (!binaryPath) {
 		return Object.freeze({ kind: "unavailable", reason: `Executable "${desiredBin}" not found in PATH.` });
@@ -149,8 +149,8 @@ export function detectProviderHealth(env = {}, nowMs = Date.now()) {
 			kind: "healthy",
 			binaryPath: resolveExecutableInPath("claude") || "/usr/bin/claude",
 		}),
-		agy: providerHealth("agy", env.agyBinOverride || process.env.CLAUGLE_AGY_BIN || "agy", env.pluginDataDir, nowMs),
-		"gemini-cli": providerHealth(
+		agy: healthOf("agy", env.agyBinOverride || process.env.CLAUGLE_AGY_BIN || "agy", env.pluginDataDir, nowMs),
+		"gemini-cli": healthOf(
 			"gemini-cli",
 			env.geminiBinOverride || process.env.CLAUGLE_GEMINI_BIN || "gemini",
 			env.pluginDataDir,
@@ -590,7 +590,7 @@ export function runHeadlessProvider(params) {
 				Object.freeze({
 					kind: "failure",
 					reason: "NON_ZERO_EXIT",
-					message: `Failed to spawn ${binaryPath}: ${err instanceof Error ? err.message : String(err)}`,
+					message: `Failed to spawn ${binaryPath}: ${errorMessage(err)}`,
 					exitCode: null,
 					durationMs: Math.max(0, Date.now() - startedAt),
 				})
