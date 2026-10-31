@@ -317,6 +317,50 @@ export function prepareAgyHome(pluginDataDir, realHome = os.homedir()) {
 	return home;
 }
 
+// agy's default agent carries a long system prompt and its own tool set. claugle runs agy as a custom
+// agent whose prompt is one line and whose tools are only what the path needs: the gateway needs
+// finish to return its structured answer, delegated runs need file tools. Claude Code's harness,
+// carried in the prompt, is the only rule set.
+const AGY_READ_TOOLS = Object.freeze(["view_file", "list_dir", "grep_search", "find_by_name"]);
+const AGY_AGENT_PROFILES = Object.freeze({
+	"claugle-gateway": {
+		tools: ["finish"],
+		instructions: "Answer the request in the transcript. Claude Code runs every tool; ask for tools only through the response schema.",
+	},
+	"claugle-reader": {
+		tools: AGY_READ_TOOLS,
+		instructions: "Read the project files you need and answer. You cannot change files, run commands or use any other tool.",
+	},
+	"claugle-editor": {
+		tools: [...AGY_READ_TOOLS, "write_to_file", "replace_file_content", "multi_replace_file_content"],
+		instructions: "Read and edit files only under the project folder named in the request. You cannot run commands or use any other tool.",
+	},
+});
+const AGY_AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+export function writeAgyAgent(dir, name) {
+	const profile = AGY_AGENT_PROFILES[name];
+	if (!profile) throw new Error(`Unknown claugle agy agent: ${name}`);
+	const agentDir = path.join(dir, ".agents", "agents", name);
+	fs.mkdirSync(agentDir, { recursive: true });
+	const body = [
+		"---",
+		`name: ${name}`,
+		"description: claugle worker",
+		"mainAgent: true",
+		"tools:",
+		...profile.tools.map((tool) => `  - ${tool}`),
+		"---",
+		"",
+		`# ${name}`,
+		"",
+		profile.instructions,
+		"",
+	].join("\n");
+	writeFileIfChanged(path.join(agentDir, "agent.md"), body);
+	return name;
+}
+
 export function buildAgyCliArgs(invocation) {
 	if (!invocation || typeof invocation.prompt !== "string" || invocation.prompt.trim().length === 0) {
 		throw new Error("AgyCliInvocation requires a non-empty prompt.");
@@ -365,6 +409,12 @@ export function buildAgyCliArgs(invocation) {
 				args.push("--add-dir", dir);
 			}
 		}
+	}
+	if (invocation.agent !== undefined) {
+		if (!AGY_AGENT_NAME.test(String(invocation.agent))) {
+			throw new Error(`Invalid agy agent name: ${JSON.stringify(invocation.agent)}`);
+		}
+		args.push("--agent", invocation.agent);
 	}
 	if (Number(invocation.timeoutMs) > 0) {
 		args.push("--print-timeout", `${Math.max(1, Math.ceil(Number(invocation.timeoutMs) / 1000))}s`);
@@ -495,6 +545,7 @@ export function runHeadlessProvider(params) {
 					disableSlashCommands: true,
 					cwd,
 					hostRepoRoot: params.hostRepoRoot,
+					agent: params.agent,
 					addDirs: params.addDirs,
 					jsonSchema: params.jsonSchema,
 					timeoutMs,
@@ -873,6 +924,7 @@ export async function executeRoutedTask(params) {
 					: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,
 			});
 		}
+		const agyAgent = gateDir ? writeAgyAgent(gateDir, lease ? "claugle-editor" : "claugle-reader") : undefined;
 		let execResult;
 		try {
 			execResult = await runHeadlessProvider({
@@ -885,6 +937,7 @@ export async function executeRoutedTask(params) {
 				cwd: projectDir,
 				addDirs: gateDir ? [gateDir] : undefined,
 				agyHome: candidate.provider === "agy" ? prepareAgyHome(env.pluginDataDir) : undefined,
+				agent: agyAgent,
 				hostRepoRoot: lease?.hostRepoRoot,
 				timeoutMs: candidate.timeoutMs,
 			});

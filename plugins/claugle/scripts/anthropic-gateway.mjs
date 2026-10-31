@@ -23,7 +23,7 @@ import {
 	resolveModelAndEffort,
 	resolveRoutePlan,
 } from "./policy-engine.mjs";
-import { detectProviderHealth, prepareAgyHome, recordCircuitBreakerOpen, runHeadlessProvider, writeAgyToolGate } from "./provider-runner.mjs";
+import { detectProviderHealth, prepareAgyHome, recordCircuitBreakerOpen, runHeadlessProvider, writeAgyAgent, writeAgyToolGate } from "./provider-runner.mjs";
 
 export const DEFAULT_GATEWAY_PORT = 18789;
 // Claude Code aborts a stream that stays silent for its idle timeout, which is at least 300 s.
@@ -707,9 +707,11 @@ export function writeAnthropicSseResponse(res, params) {
 }
 
 export function prepareGatewayWorkspace(pluginDataDir) {
-	return writeAgyToolGate(path.join(pluginDataDir, "gateway-workspace"), {
+	const dir = writeAgyToolGate(path.join(pluginDataDir, "gateway-workspace"), {
 		denyReason: "claugle gateway: agy tools are disabled. Return tool calls to Claude Code through tool_calls.",
 	});
+	writeAgyAgent(dir, "claugle-gateway");
+	return dir;
 }
 
 function sendGatewayError(res, status, errorType, message, { retryable = true } = {}) {
@@ -991,6 +993,7 @@ export function startAnthropicGatewayServer({
 				mode: "plan",
 				cwd: gatewayCwd,
 				agyHome: prepareAgyHome(env.pluginDataDir),
+				agent: "claugle-gateway",
 				jsonSchema: hasTools && candidate.provider === "agy" ? GATEWAY_TURN_JSON_SCHEMA : undefined,
 				timeoutMs: Math.min(candidate.timeoutMs ?? 180_000, remainingMs),
 				signal: clientGone.signal,

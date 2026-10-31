@@ -17,6 +17,6 @@ Call the `claugle` stdio MCP tools directly instead of spawning a subagent whene
 7. Pass `contextFiles` as paths relative to `cwd`. The tools reject absolute paths and paths outside `cwd`.
 8. To inspect 7-day token ratios or circuit-breaker status before a large run, call `claugle_quota`.
 9. Put a Gemini task into one delegation call. Pass every file it needs in `contextFiles` and state the whole request at once. Each agy run carries a fixed cost of about 7k tokens and reads files inside its own gated run, so one call that reads several files pays that cost once.
-10. When the session's main model is a Google model through the gateway, every tool step resends Claude Code's system prompt, tool schemas, and context, about 24k tokens per step. For work that needs many tool steps, use a Claude main model and delegate the long reading and long writing parts to claugle.
+10. When the session's main model is a Google model through the gateway, every tool step resends Claude Code's system prompt, tool schemas, and context, about 19k tokens per step. For work that needs many tool steps, use a Claude main model and delegate the long reading and long writing parts to claugle.
 
 See [`sketch.d.ts`](../../types/sketch.d.ts) for domain types, [`policy-engine.mjs`](../../scripts/policy-engine.mjs) for the 32-cell lookup table, and [`README.md`](../../README.md) for pool budgets and hysteresis thresholds.
