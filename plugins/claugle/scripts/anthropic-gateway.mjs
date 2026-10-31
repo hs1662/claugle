@@ -30,7 +30,7 @@ export const DEFAULT_GATEWAY_PORT = 18789;
 const DEFAULT_GATEWAY_REQUEST_BUDGET_MS = 280_000;
 const ADMIN_HEADER = "x-claugle-admin";
 
-export function computeGatewayBuildId(pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
+function computeGatewayBuildId(pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
 	const scriptsDir = path.join(pluginRoot, "scripts");
 	const hash = crypto.createHash("sha256");
 	for (const name of fs.readdirSync(scriptsDir).filter((f) => f.endsWith(".mjs")).sort()) {
@@ -706,7 +706,7 @@ export function writeAnthropicSseResponse(res, params) {
 	res.end();
 }
 
-export function prepareGatewayWorkspace(pluginDataDir) {
+function prepareGatewayWorkspace(pluginDataDir) {
 	const dir = writeAgyToolGate(path.join(pluginDataDir, "gateway-workspace"), {
 		denyReason: "claugle gateway: agy tools are disabled. Return tool calls to Claude Code through tool_calls.",
 	});

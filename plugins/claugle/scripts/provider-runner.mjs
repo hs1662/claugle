@@ -426,7 +426,7 @@ export function buildAgyCliArgs(invocation) {
 	return Object.freeze(args);
 }
 
-export function encodeAgyStreamInput(prompt) {
+function encodeAgyStreamInput(prompt) {
 	return `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
 }
 
