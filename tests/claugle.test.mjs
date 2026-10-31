@@ -1047,7 +1047,7 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 			});
 			const slashTurn2Json = await slashTurn2.json();
 			assert.equal(slashTurn2Json.stop_reason, "end_turn");
-			assert.equal(slashTurn2Json.content[0].text, '{"quotaState":"OVERFLOW_TO_AGY"}');
+			assert.match(slashTurn2Json.content[0].text, /"quotaState":"OVERFLOW_TO_AGY"/);
 		} finally {
 			gw.server.close();
 			fs.rmSync(dataDir, { recursive: true, force: true });

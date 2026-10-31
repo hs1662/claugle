@@ -40,6 +40,7 @@ claude plugin install claugle --marketplace https://github.com/hs1662/claugle.gi
 | **Stdio MCP 도구** | `claugle_write` · `claugle_review` · `claugle_run` · `claugle_quota` | 서브에이전트 생성 오버헤드 없이 Claude가 직접 JSON-RPC 2.0으로 Google AI 모델을 호출 |
 | **슬래시 커맨드** | `/claugle:write` · `/claugle:review` · `/claugle:task` · `/claugle:quota` · `/claugle:explain` | 사용자가 명시적으로 특정 작업을 위임하거나 라우팅 계획 및 7일 사용량을 조회 |
 | **전달 서브에이전트** | `claugle:gemini-writer` · `claugle:agy-coder` · `claugle:agy-reviewer` | 호스트 세션이 저장소 파일을 미리 읽으며 토큰을 쓰지 않도록 `Bash` 한 줄로 작업을 즉시 전달 |
+| **로컬 `/v1/messages` 게이트웨이** | `claugle gateway --daemon` · `claude --model argon` | 호스트 Anthropic 5시간 세션 한도가 소진되었을 때도 `ANTHROPIC_BASE_URL=http://127.0.0.1:18789`를 통해 Claude Code 하네스 전체를 `argon`(`gemini-4-argon-high`) 및 Google AI 모델로 직접 구동 |
 
 ## 저장소 구조 및 검증
 

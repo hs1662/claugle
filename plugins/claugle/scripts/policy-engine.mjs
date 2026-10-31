@@ -517,7 +517,7 @@ export function parsePluginEnv(rawEnv = process.env) {
 	}
 
 	const rawPluginData =
-		rawEnv.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".claude", "plugins", "data", "claugle");
+		rawEnv.CLAUDE_PLUGIN_DATA || path.join(os.homedir(), ".claude", "plugins", "data", "claugle-claugle");
 	const pluginDataRes = parseAbsolutePath(rawPluginData);
 	if (pluginDataRes.kind === "error") {
 		return { kind: "error", code: "INVALID_ENV", message: `CLAUDE_PLUGIN_DATA: ${pluginDataRes.message}` };

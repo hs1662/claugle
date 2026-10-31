@@ -85,10 +85,12 @@ export function extractSlashCommandFastPath(body, pluginRoot) {
 					b.input.command.includes("claugle.mjs")
 			);
 			if (matchingToolUse) {
-				const outputText = extractToolResultText(toolResultBlock).trim() || "Done.";
+				const outputText = extractToolResultText(toolResultBlock).trim() || "{}";
+				const formattedText =
+					`요청하신 실행 결과는 아래와 같습니다.\n\n\`\`\`json\n${outputText}\n\`\`\``;
 				return {
 					kind: "slash-turn-2-result",
-					text: outputText,
+					text: formattedText,
 					toolCalls: [],
 				};
 			}
@@ -100,31 +102,73 @@ export function extractSlashCommandFastPath(body, pluginRoot) {
 		body.tools.some((t) => t && t.name === "Bash");
 	if (!hasBashTool) return null;
 
-	const text = extractTextFromContent(lastMsg.content);
-	const cmdMatch =
-		/node\s+"?\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/claugle\.mjs"?\s+([^\n`]+)/.exec(text) ||
-		/node\s+"?([^"\s]+\/scripts\/claugle\.mjs)"?\s+([^\n`]+)/.exec(text);
-
-	if (!cmdMatch) return null;
+	const combinedUserText = [
+		extractTextFromContent(lastMsg.content),
+		...(Array.isArray(lastMsg.content)
+			? lastMsg.content
+					.filter((b) => b && b.type === "tool_result")
+					.map((b) => extractToolResultText(b))
+			: []),
+	].join("\n");
 
 	const resolvedPluginRoot =
 		pluginRoot ||
 		path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 	const scriptPath = path.join(resolvedPluginRoot, "scripts", "claugle.mjs");
-	const tailArgs = (cmdMatch[2] ? cmdMatch[2] : cmdMatch[1]).trim();
-	const command = `node ${JSON.stringify(scriptPath)} ${tailArgs}`;
 
-	return {
-		kind: "slash-turn-1-exec",
-		text: "",
-		toolCalls: [
-			{
-				id: `toolu_${crypto.randomBytes(8).toString("hex")}`,
-				name: "Bash",
-				input: { command },
-			},
-		],
-	};
+	const cmdMatch =
+		/node\s+"?\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/claugle\.mjs"?\s+([^\n`]+)/.exec(combinedUserText) ||
+		/node\s+"?([^"\s]+\/scripts\/claugle\.mjs)"?\s+([^\n`]+)/.exec(combinedUserText);
+
+	if (cmdMatch) {
+		const rawTail = (cmdMatch[2] ? cmdMatch[2] : cmdMatch[1]).trim();
+		const cleanedTail = rawTail.replace(/^"\$ARGUMENTS"$/, "").trim();
+		const command = cleanedTail
+			? `node ${JSON.stringify(scriptPath)} ${cleanedTail}`
+			: `node ${JSON.stringify(scriptPath)} quota`;
+		return {
+			kind: "slash-turn-1-exec",
+			text: "",
+			toolCalls: [
+				{
+					id: `toolu_${crypto.randomBytes(8).toString("hex")}`,
+					name: "Bash",
+					input: {
+						command,
+						description: "claugle 명령 실행",
+					},
+				},
+			],
+		};
+	}
+
+	const rawSlashMatch =
+		/(?:^|\n)\s*\/claugle:(quota|explain|write|review|task)(?:\s+([^\n]+))?\s*$/.exec(
+			combinedUserText.trim()
+		);
+	if (rawSlashMatch) {
+		const sub = rawSlashMatch[1] === "task" ? "run" : rawSlashMatch[1];
+		const rest = (rawSlashMatch[2] || "").trim();
+		const command = rest
+			? `node ${JSON.stringify(scriptPath)} ${sub} ${JSON.stringify(rest)}`
+			: `node ${JSON.stringify(scriptPath)} ${sub}`;
+		return {
+			kind: "slash-turn-1-exec",
+			text: "",
+			toolCalls: [
+				{
+					id: `toolu_${crypto.randomBytes(8).toString("hex")}`,
+					name: "Bash",
+					input: {
+						command,
+						description: "claugle 명령 실행",
+					},
+				},
+			],
+		};
+	}
+
+	return null;
 }
 
 function makeGatewayTarget(modelSlug) {
@@ -215,7 +259,10 @@ export function resolveGatewayCandidates({
 export function buildGatewayPrompt(body) {
 	const sections = [
 		"You are the model engine running inside the Claude Code harness.",
-		"규칙: 한국어로 답한다.",
+		"규칙 1: 모든 답변과 설명은 반드시 한국어로만 작성한다. 영어 문장을 출력하지 않는다.",
+		"규칙 2: 도구 호출 시 description 등 설명 필드는 반드시 한국어로 작성한다.",
+		"규칙 3: 도구 출력에 없는 구체적인 수치나 식별자를 본문에 쓸 때는 (추론) 또는 (제안) 라벨을 붙인다.",
+		"규칙 4: 완료했습니다, 해결했습니다, 성공했습니다, 동작합니다 같은 판정어 대신 확인했습니다, 정리했습니다, 작성했습니다를 사용한다.",
 		"Do NOT invoke any internal Antigravity tools. Only produce the response for the Claude Code harness.",
 	];
 
@@ -480,7 +527,7 @@ export function startAnthropicGatewayServer({
 			? parsedEnv.value
 			: {
 					pluginRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
-					pluginDataDir: path.join(os.homedir(), ".claude", "plugins", "data", "claugle"),
+					pluginDataDir: path.join(os.homedir(), ".claude", "plugins", "data", "claugle-claugle"),
 					projectDir: process.cwd(),
 					sessionId: "gateway-session",
 					weeklyBudgets: {
