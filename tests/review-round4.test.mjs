@@ -83,7 +83,7 @@ describe("symlinks inside .agents count as customizations", () => {
 	});
 });
 
-describe("round 4 review follow-ups", () => {
+describe("odd inputs at the CLI, task request and gateway probe", () => {
 	it("keeps a mid-text -- in the prompt when no option is near it", () => {
 		assert.equal(parseCliSubcommandArgs(["--args-stdin"], "explain why git checkout main -- src/ restores only src").prompt, "explain why git checkout main -- src/ restores only src");
 	});

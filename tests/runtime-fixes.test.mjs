@@ -137,7 +137,7 @@ function settleWithin(promise, ms) {
 	return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve("still pending"), ms))]);
 }
 
-describe("R1. delegated agy runs are bound by deny rules", () => {
+describe("delegated agy runs are bound by deny rules", () => {
 	it("a read-only run cannot write, and every run denies commands, browser, MCP, subagents and URLs", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`write("agy-wrote.txt", "agy wrote this\\n"); reply("ok");`);
@@ -161,7 +161,7 @@ describe("R1. delegated agy runs are bound by deny rules", () => {
 	});
 });
 
-describe("R1b. edit runs cannot write outside their worktree", () => {
+describe("edit runs cannot write outside their worktree", () => {
 	it("cannot write straight into the host repository", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`
@@ -191,7 +191,7 @@ reply("ok");`);
 	});
 });
 
-describe("R2. edits requested from a repo subfolder", () => {
+describe("edits requested from a repo subfolder", () => {
 	it("run agy in the matching worktree subfolder and apply relative to that subfolder", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`write("note.txt", "from agy\\n"); reply("ok");`);
@@ -227,7 +227,7 @@ reply("ok");`);
 	});
 });
 
-describe("R3. applying edits to the host", () => {
+describe("applying edits to the host", () => {
 	it("changes the working tree only and leaves the host index untouched", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`write("docs/guide.md", "line 1\\nchanged\\nline 3\\n"); reply("ok");`);
@@ -239,7 +239,7 @@ describe("R3. applying edits to the host", () => {
 	});
 });
 
-describe("R4. provider timeouts", () => {
+describe("provider timeouts", () => {
 	it("kill an agy that ignores SIGTERM, together with its children, and resolve promptly", async () => {
 		const stub = shellStub(`trap '' TERM\necho $$ > "$DIR/agy.pid"\nsleep 30 &\necho $! > "$DIR/child.pid"\nwait`);
 		const started = Date.now();
@@ -298,7 +298,7 @@ describe("R4. provider timeouts", () => {
 	});
 });
 
-describe("R5. circuit breaker", () => {
+describe("circuit breaker", () => {
 	const quotaOnSonnet = `if (model === "claude-sonnet-5-5-high") { process.stderr.write("Error: QUOTA_EXHAUSTED for " + model + "\\n"); process.exit(1); } reply("answered by " + model);`;
 
 	it("stops calling an exhausted pool until its exhaustion window passes, while other pools keep serving", async () => {
@@ -340,7 +340,7 @@ describe("R5. circuit breaker", () => {
 	});
 });
 
-describe("R6. failed delegation", () => {
+describe("failed delegation", () => {
 	it("hands the task back to Claude after every external candidate fails", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`process.stderr.write("agy crashed\\n"); process.exit(3);`);
@@ -355,7 +355,7 @@ describe("R6. failed delegation", () => {
 	});
 });
 
-describe("R7. repositories without commits", () => {
+describe("repositories without commits", () => {
 	it("refuse edit candidates with a clear error instead of crashing", async () => {
 		const repo = tmp("claugle-rt-empty-");
 		git(repo, "init", "-q");
@@ -368,7 +368,7 @@ describe("R7. repositories without commits", () => {
 	});
 });
 
-describe("R8. SessionStart environment", () => {
+describe("SessionStart environment", () => {
 	it("does not point nested claude processes at the gateway", () => {
 		const data = tmp("claugle-rt-data-");
 		const envFile = path.join(data, "claude.env");
@@ -382,7 +382,7 @@ describe("R8. SessionStart environment", () => {
 	});
 });
 
-describe("R9. Stop hook records native Claude Code usage", () => {
+describe("Stop hook records native Claude Code usage", () => {
 	function assistantLine(id, model, usage, timestamp = new Date().toISOString()) {
 		return `${JSON.stringify({ type: "assistant", timestamp, message: { id, model, role: "assistant", usage, content: [] } })}\n`;
 	}
@@ -441,7 +441,7 @@ describe("R9. Stop hook records native Claude Code usage", () => {
 	});
 });
 
-describe("R10. context files", () => {
+describe("context files", () => {
 	it("are read only when their real path stays inside the task cwd", async () => {
 		const cwd = tmp("claugle-rt-cwd-");
 		const outside = tmp("claugle-rt-secret-");
@@ -468,7 +468,7 @@ describe("R10. context files", () => {
 	});
 });
 
-describe("R11. more runner and sandbox defects", () => {
+describe("runner and sandbox edge cases", () => {
 	const run = (stub) =>
 		runHeadlessProvider({
 			provider: "agy",
@@ -597,7 +597,7 @@ reply("ok");`);
 	});
 });
 
-describe("R11b. a run headless agy stopped early", () => {
+describe("a run headless agy stopped early", () => {
 	it("is not reported as completed, and its partial edits are discarded", async () => {
 		const repo = makeRepo();
 		const agy = stubAgy(`

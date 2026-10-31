@@ -142,7 +142,7 @@ function recordAt(pluginDataDir, event) {
 	appendUsageEvent({ pluginDataDir, event: { sessionId: "psf", ...event } });
 }
 
-describe("P1 agy edits files only when the caller allows edits", () => {
+describe("agy edits files only when the caller allows edits", () => {
 	it("claugle_run with {prompt: 'refactor the parser'} leaves the host checkout untouched", async () => {
 		const repo = makeRepo();
 		const { agyPath, calls } = mockAgy();
@@ -181,7 +181,7 @@ describe("P1 agy edits files only when the caller allows edits", () => {
 	});
 });
 
-describe("P2 hysteresis survives between snapshot loads", () => {
+describe("hysteresis survives between snapshot loads", () => {
 	it("stays in CONSERVE_CLAUDE when host usage drops from 0.71 to 0.66 and leaves once it falls below 0.65", () => {
 		const dataDir = tmp("p2");
 		const t0 = 1_800_000_000_000;
@@ -202,7 +202,7 @@ describe("P2 hysteresis survives between snapshot loads", () => {
 	});
 });
 
-describe("P3 and P4 exhaustion signals drive and then release the governor", () => {
+describe("exhaustion signals drive and then release the governor", () => {
 	const now = 1_800_000_000_000;
 	const stateAfter = (pool, provider, ageMs) => {
 		const dataDir = tmp("signal");
@@ -261,7 +261,7 @@ describe("P3 and P4 exhaustion signals drive and then release the governor", () 
 	});
 });
 
-describe("P5 compaction never loses events from live shards", () => {
+describe("compaction never loses events from live shards", () => {
 	it("keeps every fresh event while four processes append and compaction runs in a loop", async () => {
 		const dataDir = tmp("p5");
 		const writers = 4;
@@ -298,7 +298,7 @@ for (let i = 0; i < ${perWriter}; i++) {
 	});
 });
 
-describe("P6 context files stay inside the task cwd", () => {
+describe("context files stay inside the task cwd", () => {
 	it("parseTaskRequest rejects absolute paths and paths that climb out of cwd", () => {
 		const cwd = tmp("p6-project");
 		for (const bad of ["../secret.txt", "/etc/passwd", "docs/../../secret.txt", ".."]) {
@@ -325,7 +325,7 @@ describe("P6 context files stay inside the task cwd", () => {
 	});
 });
 
-describe("P7 hook setup runs only for the SessionStart event", () => {
+describe("hook setup runs only for the SessionStart event", () => {
 	async function runHook(payload) {
 		let probes = 0;
 		const server = http.createServer((req, res) => {
@@ -355,7 +355,7 @@ describe("P7 hook setup runs only for the SessionStart event", () => {
 	});
 });
 
-describe("P8 slash commands pass flags and prompt text intact", () => {
+describe("slash commands pass flags and prompt text intact", () => {
 	function runSlashCommand(command, userText, env) {
 		const body = fs.readFileSync(path.join(PLUGIN_ROOT, "commands", `${command}.md`), "utf8");
 		const block = /```bash\n([\s\S]*?)```/.exec(body)[1];
@@ -405,7 +405,7 @@ describe("P8 slash commands pass flags and prompt text intact", () => {
 	});
 });
 
-describe("P9 the MCP server stays silent on notifications", () => {
+describe("the MCP server stays silent on notifications", () => {
 	it("answers a ping but not a notifications/progress message", async () => {
 		const child = spawn(process.execPath, [MCP_SERVER], { env: isolatedEnv(), stdio: ["pipe", "pipe", "pipe"] });
 		const lines = [];
@@ -436,7 +436,7 @@ describe("P9 the MCP server stays silent on notifications", () => {
 	});
 });
 
-describe("P10 every plugin setting does something", () => {
+describe("every plugin setting does something", () => {
 	const manifest = () => JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json"), "utf8"));
 	const observe = (extra) => {
 		const env = isolatedEnv(extra);
@@ -463,7 +463,7 @@ describe("P10 every plugin setting does something", () => {
 	});
 });
 
-describe("P11 boundary and surface defects", () => {
+describe("CLI and MCP boundaries", () => {
 	it("allowFileEdits: 'false' from an MCP client does not turn edits on", async () => {
 		const repo = makeRepo();
 		const { agyPath, calls } = mockAgy();

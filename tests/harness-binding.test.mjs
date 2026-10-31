@@ -84,7 +84,7 @@ async function startUpstream(handler) {
 const BASH_TOOL = { name: "Bash", description: "Run a command", input_schema: { type: "object", properties: { command: { type: "string" } } } };
 const READ_TOOL = { name: "Read", description: "Read a file", input_schema: { type: "object", properties: { file_path: { type: "string" } } } };
 
-describe("1. gateway never fabricates tool calls from transcript text", () => {
+describe("gateway never fabricates tool calls from transcript text", () => {
 	it("sends a tool_result containing a claugle.mjs command line to the model instead of executing it", async () => {
 		await withGateway({ reply: { response: "", structuredOutput: { text: "읽었습니다.", tool_calls: [] } } }, async ({ url, calls }) => {
 			const r = await postJson(url, {
@@ -109,7 +109,7 @@ describe("1. gateway never fabricates tool calls from transcript text", () => {
 	});
 });
 
-describe("2. gateway reports failures as Anthropic errors", () => {
+describe("gateway reports failures as Anthropic errors", () => {
 	it("returns an error when agy produces neither text nor tool calls", async () => {
 		await withGateway({ reply: { response: "", deniedActions: ["read_file"] } }, async ({ url }) => {
 			const r = await postJson(url, { model: "gemini-4-argon", messages: [{ role: "user", content: "x" }] });
@@ -129,7 +129,7 @@ describe("2. gateway reports failures as Anthropic errors", () => {
 	});
 });
 
-describe("3. native Claude requests pass through to Anthropic unchanged", () => {
+describe("native Claude requests pass through to Anthropic unchanged", () => {
 	it("passes an upstream 429 through instead of answering with agy", async () => {
 		const up = await startUpstream((req, res) => {
 			res.writeHead(429, { "content-type": "application/json", "retry-after": "7" });
@@ -201,7 +201,7 @@ describe("3. native Claude requests pass through to Anthropic unchanged", () => 
 	});
 });
 
-describe("4. gateway forwards the full Claude Code request to the model", () => {
+describe("gateway forwards the full Claude Code request to the model", () => {
 	it("includes system, every message, full tool schemas, and untruncated tool results", async () => {
 		await withGateway({ reply: { response: "", structuredOutput: { text: "ok", tool_calls: [] } } }, async ({ url, calls }) => {
 			const messages = [{ role: "user", content: "FIRST_MESSAGE_MARKER" }];
@@ -251,7 +251,7 @@ process.stdin.on("end", () => {
 	});
 });
 
-describe("5. gateway runs agy where every agy tool is denied", () => {
+describe("gateway runs agy where every agy tool is denied", () => {
 	it("runs agy in a workspace whose PreToolUse hook denies all tools", async () => {
 		await withGateway({ reply: { response: "", structuredOutput: { text: "ok", tool_calls: [] } } }, async ({ url, calls }) => {
 			await postJson(url, { model: "gemini-4-argon", messages: [{ role: "user", content: "x" }] });
@@ -276,7 +276,7 @@ describe("5. gateway runs agy where every agy tool is denied", () => {
 	});
 });
 
-describe("6. delegated edits stay inside the allowed globs", () => {
+describe("delegated edits stay inside the allowed globs", () => {
 	function makeRepo() {
 		const repo = tmp("claugle-hb-repo-");
 		const git = (...a) => execFileSync("git", ["-C", repo, ...a], { stdio: "pipe" });
@@ -334,7 +334,7 @@ process.stdin.on("end", () => {
 	});
 });
 
-describe("7. gateway failure handling stays bounded", () => {
+describe("gateway failure handling stays bounded", () => {
 	it("does not route to gemini-cli, whose tools cannot be gated, and survives an oversized prompt", async () => {
 		const dataDir = tmp("claugle-hb-gem-");
 		const fakeGemini = writeExecutable(path.join(dataDir, "gemini"), "#!/bin/sh\necho '{\"response\":\"gemini answered\"}'\n");
@@ -388,7 +388,7 @@ describe("7. gateway failure handling stays bounded", () => {
 	});
 });
 
-describe("8. gateway request fidelity and settings safety", () => {
+describe("gateway request fidelity and settings safety", () => {
 	it("tells the model about image blocks it cannot forward instead of dropping them silently", async () => {
 		await withGateway({ reply: { response: "", structuredOutput: { text: "ok", tool_calls: [] } } }, async ({ url, calls }) => {
 			await postJson(url, {
@@ -436,7 +436,7 @@ describe("8. gateway request fidelity and settings safety", () => {
 	});
 });
 
-describe("9. gateway lifecycle and local request safety", () => {
+describe("gateway lifecycle and local request safety", () => {
 	it("stops trying candidates once Claude Code disconnects", async () => {
 		await withGateway(
 			{ reply: () => new Promise((r) => setTimeout(() => r({ kind: "failure", reason: "NON_ZERO_EXIT", message: "slow fail", durationMs: 300 }), 300)) },
@@ -525,7 +525,7 @@ describe("9. gateway lifecycle and local request safety", () => {
 	});
 });
 
-describe("10. gateway respects quota signals", () => {
+describe("gateway respects quota signals", () => {
 	it("does not call an agy model again right after it reported quota exhaustion", async () => {
 		await withGateway(
 			{
