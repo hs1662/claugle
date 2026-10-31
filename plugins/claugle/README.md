@@ -48,7 +48,7 @@ claude plugin install claugle --marketplace https://github.com/hs1662/claugle.gi
 서브에이전트 턴을 새로 열지 않아도 호스트 Claude가 즉석에서 부를 수 있도록 JSON-RPC 2.0 도구 네 개를 제공합니다.
 
 - `claugle_write`: 릴리스 노트, README, 번역문, 커밋 메시지, 요약문 작성을 Gemini 모델로 위임합니다. `allowFileEdits: true`와 `allowedEditGlobs`를 함께 넘기면 격리된 워크트리에서 마크다운 파일을 직접 수정한 뒤 반영합니다.
-- `claugle_review`: `claude-sonnet-5-5-high`, `claude-opus-5-5-high`, `gemini-4-argon-high`에 코드 리뷰와 보안 감사를 맡깁니다. 읽기 전용 실행이며, claugle 도구 게이트가 프로젝트 안의 `read_file`만 허용합니다.
+- `claugle_review`: `claude-sonnet-5-5-high`, `claude-opus-5-5-high`, `gemini-4-argon-high`에 코드 리뷰와 보안 감사를 맡깁니다. 읽기 전용 실행이며, claugle 도구 게이트가 프로젝트 안의 파일 읽기 도구만 허용합니다.
 - `claugle_run`: 코딩, 리서치, 아키텍처 작업을 32-셀 정책 행렬에 따라 라우팅합니다. `allowFileEdits: true`를 넘긴 경우에만 격리된 워크트리에서 파일을 수정하며, 생략하면 작업 유형과 상관없이 읽기 전용으로 실행합니다.
 - `claugle_quota`: 4개 풀의 7일 누적 토큰, 소비 비율, 현재 `QuotaState`, 바이너리 헬스 및 서킷 브레이커 상태를 JSON으로 반환합니다.
 
