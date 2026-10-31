@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { loadRollingQuotaSnapshot } from "./ledger-store.mjs";
 import {
 	ALL_TASK_KINDS,
+	dropRepoLocalGitEnv,
 	EFFORT_LEVELS,
 	MODEL_CAPABILITIES,
 	parsePluginEnv,
@@ -399,5 +400,6 @@ const isMainModule =
 	fs.realpathSync(fileURLToPath(import.meta.url)) === resolvedArgv1;
 
 if (isMainModule) {
+	dropRepoLocalGitEnv(process.env);
 	startMcpServer();
 }

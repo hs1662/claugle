@@ -70,10 +70,13 @@ describe("claugle runs agy as a minimal custom agent with only the tools each pa
 		const agy = agentProbe(tmp("claugle-agent-bin-"));
 		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("claugle-agent-data-"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
 		const read = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env });
-		assert.deepEqual(JSON.parse(read.responseText), { agent: "claugle-reader", tools: ["view_file", "list_dir", "grep_search", "find_by_name"], namesProject: true, optsOut: true });
+		const { agent: readAgent, ...readSeen } = JSON.parse(read.responseText);
+		assert.match(readAgent, /^claugle-reader-[0-9a-f]{12}$/);
+		assert.deepEqual(readSeen, { tools: ["view_file", "list_dir", "grep_search", "find_by_name"], namesProject: true, optsOut: true });
 		const edit = await executeRoutedTask({ request: parseTaskRequest({ prompt: "update docs/guide.md", explicitTaskKind: "docs", allowFileEdits: true, allowedEditGlobs: ["docs/**"], cwd: repo }).value, env });
-		assert.deepEqual(JSON.parse(edit.responseText.split("\n")[0]), {
-			agent: "claugle-editor",
+		const { agent: editAgent, ...editSeen } = JSON.parse(edit.responseText.split("\n")[0]);
+		assert.match(editAgent, /^claugle-editor-[0-9a-f]{12}$/);
+		assert.deepEqual(editSeen, {
 			tools: ["view_file", "list_dir", "grep_search", "find_by_name", "write_to_file", "replace_file_content", "multi_replace_file_content"],
 			namesProject: true,
 			optsOut: true,

@@ -42,6 +42,7 @@ import {
 	buildClaudeModelPickerConfig,
 	classifyTask,
 	createTaskExecutionId,
+	dropRepoLocalGitEnv,
 	isAgyModelSlug,
 	isGeminiCliModelSlug,
 	isUnitIntervalRatio,
@@ -723,6 +724,7 @@ const isMainModule =
 	fs.realpathSync(fileURLToPath(import.meta.url)) === resolvedArgv1;
 
 if (isMainModule) {
+	dropRepoLocalGitEnv(process.env);
 	runCli().then(
 		(code) => {
 			process.exitCode = code;

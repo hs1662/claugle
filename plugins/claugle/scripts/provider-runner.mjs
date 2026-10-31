@@ -377,9 +377,13 @@ const AGY_AGENT_PROFILES = Object.freeze({
 });
 const AGY_AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-export function writeAgyAgent(dir, name, projectDir) {
-	const profile = AGY_AGENT_PROFILES[name];
-	if (!profile) throw new Error(`Unknown claugle agy agent: ${name}`);
+export function writeAgyAgent(dir, profileName, projectDir) {
+	const profile = AGY_AGENT_PROFILES[profileName];
+	if (!profile) throw new Error(`Unknown claugle agy agent: ${profileName}`);
+	// A delegated run has the project as a workspace root, and agy takes an agent's definition from the
+	// root whose path sorts first. A project could define an agent under any fixed name, so a delegated
+	// run's agent gets a name the project cannot know in advance. The gateway has no project root.
+	const name = projectDir === undefined ? profileName : `${profileName}-${crypto.randomBytes(6).toString("hex")}`;
 	const agentDir = path.join(dir, ".agents", "agents", name);
 	fs.mkdirSync(agentDir, { recursive: true });
 	const body = [
@@ -619,6 +623,8 @@ export function runHeadlessProvider(params) {
 				env: {
 					...process.env,
 					CLAUGLE_HEADLESS_SUBPROCESS: "1",
+					// agy takes its workspace root from PWD, so it must name the folder claugle checked.
+					PWD: cwd,
 					...(provider === "agy" && params.agyHome ? { HOME: params.agyHome } : {}),
 				},
 				stdio: [provider === "gemini-cli" ? "ignore" : "pipe", "pipe", "pipe"],

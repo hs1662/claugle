@@ -1049,7 +1049,35 @@ export function parsePluginEnv(rawEnv = process.env) {
 
 // agy's docs: workspace customizations live in `.agents/` (or `.agent/`, `_agents/`, `_agent/`).
 export const AGY_WORKSPACE_DIRS = Object.freeze([".agents", ".agent", "_agents", "_agent"]);
-export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ...AGY_WORKSPACE_DIRS, ".claude", ".gemini", ".mcp.json"]);
+// Files that instruct Claude Code or agy at any depth. An edit run must not rewrite the rules that bind
+// the next run.
+const HARNESS_INSTRUCTION_FILES = Object.freeze(["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md"]);
+export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ...AGY_WORKSPACE_DIRS, ".claude", ".gemini", ".mcp.json", ...HARNESS_INSTRUCTION_FILES]);
+
+// `git rev-parse --local-env-vars`. Inherited from a git hook or a shell inside another repo, these aim
+// every git call claugle makes, and agy's own walk up to the repo top, at that other repo.
+const REPO_LOCAL_GIT_ENV = Object.freeze([
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_CONFIG",
+	"GIT_CONFIG_PARAMETERS",
+	"GIT_CONFIG_COUNT",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_IMPLICIT_WORK_TREE",
+	"GIT_GRAFT_FILE",
+	"GIT_INDEX_FILE",
+	"GIT_NO_REPLACE_OBJECTS",
+	"GIT_REPLACE_REF_BASE",
+	"GIT_PREFIX",
+	"GIT_SHALLOW_FILE",
+	"GIT_COMMON_DIR",
+]);
+
+export function dropRepoLocalGitEnv(env) {
+	for (const name of REPO_LOCAL_GIT_ENV) delete env[name];
+	return env;
+}
 
 const MAX_REQUEST_TASK_ID_LENGTH = 100;
 export function isSafeTaskId(taskId) {

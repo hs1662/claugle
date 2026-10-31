@@ -60,9 +60,9 @@ describe("agy gets only deny rules it accepts", () => {
 	});
 });
 
-describe("edit runs cannot plant agy customizations in the host repo", () => {
-	it("the gate denies writes into every agy customization folder, and the harvest rejects them when written anyway", async () => {
-		const planted = [".agent/hooks.json", "_agents/x", "_agent/x"];
+describe("edit runs cannot plant agy customizations or harness instructions in the host repo", () => {
+	it("the gate denies writes into every agy customization folder and instruction file, and the harvest rejects them when written anyway", async () => {
+		const planted = [".agent/hooks.json", "_agents/x", "_agent/x", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", "src/GEMINI.md"];
 		const repo = gitRepo();
 		const agy = stubAgy(`
 const gate = path.join(addDirs[0], ".agents");
@@ -75,7 +75,7 @@ for (const rel of ${JSON.stringify(planted)}) {
 record(verdicts);
 reply("done");`);
 		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the readme", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
-		assert.deepEqual(agy.recorded(), { "notes.txt": "allow", ".agent/hooks.json": "deny", "_agents/x": "deny", "_agent/x": "deny" });
+		assert.deepEqual(agy.recorded(), { "notes.txt": "allow", ...Object.fromEntries(planted.map((rel) => [rel, "deny"])) });
 		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
 		assert.deepEqual([...out.worktreeOutcome.violatingFiles].sort(), [...planted].sort());
 		for (const rel of planted) assert.equal(fs.existsSync(path.join(repo, rel)), false, rel);
@@ -299,5 +299,52 @@ reply("ok");`);
 		}
 		assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
 		assert.equal(agy.started(), false);
+	});
+});
+
+describe("agy sees the folders and agent claugle chose", () => {
+	it("a project's own agent named like claugle's never replaces claugle's agent", async () => {
+		const projectAgent = "---\nname: claugle-reader\nmainAgent: true\ntools:\n  - run_command\n---\n\nYou are PROJECT-DEF.\n";
+		const repo = gitRepo({ ".agents/agents/claugle-reader/agent.md": projectAgent, ".agents/agents/claugle-editor/agent.md": projectAgent.replace("reader", "editor") });
+		const agy = stubAgy(`
+const agent = a[a.indexOf("--agent") + 1];
+const roots = [process.cwd(), ...addDirs].sort();
+const def = roots.map((r) => path.join(r, ".agents", "agents", agent, "agent.md")).find((f) => fs.existsSync(f));
+record({ definedBy: def && def.startsWith(addDirs[0]) ? "claugle" : "project", optsOut: Boolean(def) && fs.readFileSync(def, "utf8").includes("excludeDefaultComponents: true") });
+reply("done");`);
+		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("zzz-claugle-data-"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+		assert.ok(repo < env.pluginDataDir, "the project path sorts before the plugin data path");
+		for (const extra of [{}, { allowFileEdits: true, allowedEditGlobs: ["docs/**"] }]) {
+			await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo, ...extra }).value, env });
+			assert.deepEqual(agy.recorded(), { definedBy: "claugle", optsOut: true }, JSON.stringify(extra));
+		}
+	});
+
+	it("agy's PWD is the folder it runs in, not the caller's", async () => {
+		const repo = gitRepo();
+		const agy = stubAgy(`record({ pwd: process.env.PWD, cwd: process.cwd() }); reply("done");`);
+		const saved = process.env.PWD;
+		process.env.PWD = tmp("claugle-iso-elsewhere-");
+		try {
+			await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			process.env.PWD = saved;
+		}
+		const seen = agy.recorded();
+		assert.equal(seen.pwd, seen.cwd);
+	});
+
+	it("an inherited GIT_DIR does not stop the gate folder from becoming its own repo", () => {
+		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
+		const repo = gitRepo();
+		const other = gitRepo();
+		const agy = stubAgy(`record({ gateHasOwnGit: fs.existsSync(path.join(addDirs[0], ".git")), gitDir: process.env.GIT_DIR ?? null }); reply("done");`);
+		const cli = path.resolve("plugins/claugle/scripts/claugle.mjs");
+		execFileSync(process.execPath, [cli, "run", "--json", "--model", "flash", "Review src"], {
+			cwd: repo,
+			env: { ...process.env, CLAUDE_PLUGIN_DATA: path.join(outer, "plugin-data"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini", GIT_DIR: path.join(other, ".git") },
+			stdio: "pipe",
+		});
+		assert.deepEqual(agy.recorded(), { gateHasOwnGit: true, gitDir: null });
 	});
 });
