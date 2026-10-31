@@ -30,6 +30,7 @@ import {
 	ALL_QUOTA_POOLS,
 	ALL_QUOTA_STATES,
 	ALL_TASK_KINDS,
+	ANTHROPIC_BUILTIN_CATALOG,
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
 	EFFORT_LEVELS,
@@ -48,6 +49,7 @@ import {
 	parsePluginEnv,
 	parseRelativeGlob,
 	parseTaskRequest,
+	resolveBuiltinAnthropicModel,
 	resolveModelAlias,
 	resolveModelAndEffort,
 	resolveRoutePlan,
@@ -76,6 +78,7 @@ export {
 	ALL_QUOTA_POOLS,
 	ALL_QUOTA_STATES,
 	ALL_TASK_KINDS,
+	ANTHROPIC_BUILTIN_CATALOG,
 	DEFAULT_GATEWAY_PORT,
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
@@ -119,6 +122,7 @@ export {
 	readConfiguredModelEffort,
 	reconcileStaleWorktrees,
 	recordCircuitBreakerOpen,
+	resolveBuiltinAnthropicModel,
 	resolveGatewayCandidates,
 	resolveModelAlias,
 	resolveModelAndEffort,
@@ -311,7 +315,7 @@ export function runInteractiveModelPickerTui({
 	settingsPath,
 } = {}) {
 	const initialSync = syncClaudeModelPickerSettings({ settingsPath });
-	const families = MODEL_FAMILY_CATALOG;
+	const families = [...ANTHROPIC_BUILTIN_CATALOG, ...MODEL_FAMILY_CATALOG];
 	let selectedIdx = Math.max(
 		0,
 		families.findIndex((f) => f.familyId === initialSync.activeModel)

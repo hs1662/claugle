@@ -8,6 +8,7 @@ import {
 	ALL_QUOTA_POOLS,
 	ALL_QUOTA_STATES,
 	ALL_TASK_KINDS,
+	ANTHROPIC_BUILTIN_CATALOG,
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
 	MCP_TOOL_DEFINITIONS,
@@ -34,6 +35,7 @@ import {
 	parseRelativeGlob,
 	parseTaskRequest,
 	reconcileStaleWorktrees,
+	resolveBuiltinAnthropicModel,
 	resolveModelAlias,
 	resolveModelAndEffort,
 	resolveRoutePlan,
@@ -900,6 +902,7 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 		assert.equal(resolveModelAlias("agy-sonnet"), "claude-sonnet-5-5-high");
 		assert.equal(resolveModelAlias("unknown-slug"), null);
 
+		assert.equal(ANTHROPIC_BUILTIN_CATALOG.length, 5);
 		assert.equal(MODEL_FAMILY_CATALOG.length, 8);
 		const argonLow = resolveModelAndEffort("gemini-4-argon", "low");
 		assert.equal(argonLow.modelSlug, "gemini-4-argon-low");
@@ -914,14 +917,21 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 		assert.equal(opusLow.modelSlug, "claude-opus-5-5-low");
 		assert.equal(opusLow.effort, "low");
 
+		assert.equal(resolveModelAndEffort("claude-opus-5-5", "high"), null);
+		const builtinOpus = resolveBuiltinAnthropicModel("claude-opus-5-5", "medium");
+		assert.equal(builtinOpus.mode, "claude-native");
+		assert.equal(builtinOpus.familyId, "opus");
+		assert.equal(builtinOpus.effort, "medium");
+
 		const autoMode = resolveModelAndEffort("claugle-auto", "medium");
 		assert.equal(autoMode.mode, "auto");
 		assert.equal(autoMode.modelSlug, null);
 
 		const pickerCfg = buildClaudeModelPickerConfig();
-		assert.equal(pickerCfg.modelPicker.replaceBuiltInOptions, true);
+		assert.equal(pickerCfg.modelPicker.replaceBuiltInOptions, false);
 		assert.ok(pickerCfg.modelPicker.options.length >= 20);
 		assert.equal(pickerCfg.modelSettings["gemini-4-argon"].effortLevel, "high");
+		assert.equal(pickerCfg.modelSettings["opus"].effortLevel, "high");
 		assert.equal(pickerCfg.modelSettings["gpt-oss-120b"].maxEffortLevel, "medium");
 
 		const tmpSettingsDir = fs.mkdtempSync(path.join(os.tmpdir(), "claugle-settings-"));
@@ -935,10 +945,21 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 		assert.equal(syncedSettings.activeModel, "gemini-4-argon");
 		assert.equal(syncedSettings.activeEffort, "low");
 		assert.equal(syncedSettings.resolvedModelSlug, "gemini-4-argon-low");
+		assert.equal(syncedSettings.availableFamilies.length, 13);
 		const savedJson = JSON.parse(fs.readFileSync(tmpSettingsPath, "utf8"));
 		assert.equal(savedJson.model, "gemini-4-argon");
 		assert.equal(savedJson.modelSettings["gemini-4-argon"].effortLevel, "low");
-		assert.equal(savedJson.modelPicker.replaceBuiltInOptions, true);
+		assert.equal(savedJson.modelPicker.replaceBuiltInOptions, false);
+
+		const syncedNative = syncClaudeModelPickerSettings({
+			settingsPath: tmpSettingsPath,
+			selectedModel: "opus",
+			selectedEffort: "medium",
+		});
+		assert.equal(syncedNative.kind, "ok");
+		assert.equal(syncedNative.activeModel, "opus");
+		assert.equal(syncedNative.activeEffort, "medium");
+		assert.equal(syncedNative.routingMode, "claude-native");
 		fs.rmSync(tmpSettingsDir, { recursive: true, force: true });
 
 		const reqWithAlias = parseTaskRequest({
@@ -1045,7 +1066,21 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 
 			const modelsRes = await fetch(`${gw.url}/v1/models`, { method: "GET" });
 			const modelsJson = await modelsRes.json();
-			assert.equal(modelsJson.data.length, 8);
+			assert.equal(modelsJson.data.length, 13);
+
+			const nativeFallbackRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: "claude-sonnet-5-5",
+					output_config: { effort: "medium" },
+					stream: false,
+					messages: [{ role: "user", content: "내장 Sonnet 폴백 테스트" }],
+				}),
+			});
+			const nativeFallbackJson = await nativeFallbackRes.json();
+			assert.equal(nativeFallbackJson.model, "claude-sonnet-5-5-medium");
+			assert.equal(nativeFallbackJson.content[0].text, "응답 모델: claude-sonnet-5-5-medium");
 
 			const sseRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
 				method: "POST",

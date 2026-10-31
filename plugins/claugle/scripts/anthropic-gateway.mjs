@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendUsageEvent, loadRollingQuotaSnapshot } from "./ledger-store.mjs";
 import {
+	ANTHROPIC_BUILTIN_CATALOG,
 	DEFAULT_POLICY_MATRIX,
 	MODEL_CAPABILITIES,
 	MODEL_FAMILY_CATALOG,
@@ -15,6 +16,7 @@ import {
 	createTaskExecutionId,
 	parsePluginEnv,
 	parseTaskRequest,
+	resolveBuiltinAnthropicModel,
 	resolveModelAlias,
 	resolveModelAndEffort,
 	resolveRoutePlan,
@@ -261,11 +263,12 @@ export function syncClaudeModelPickerSettings({
 		mergedModelSettings[activeFamilyOrModel]?.effortLevel ?? "high";
 
 	if (selectedModel !== undefined && selectedModel !== null && String(selectedModel).trim() !== "") {
-		const resolved = resolveModelAndEffort(
-			String(selectedModel),
-			selectedEffort,
-			{ preferExplicitEffort: Boolean(selectedEffort) }
-		);
+		const resolved =
+			resolveModelAndEffort(
+				String(selectedModel),
+				selectedEffort,
+				{ preferExplicitEffort: Boolean(selectedEffort) }
+			) ?? resolveBuiltinAnthropicModel(String(selectedModel), selectedEffort);
 		if (!resolved) {
 			return {
 				kind: "error",
@@ -289,11 +292,12 @@ export function syncClaudeModelPickerSettings({
 			};
 		}
 	} else if (selectedEffort !== undefined && selectedEffort !== null && String(selectedEffort).trim() !== "") {
-		const resolved = resolveModelAndEffort(
-			activeFamilyOrModel,
-			selectedEffort,
-			{ preferExplicitEffort: true }
-		);
+		const resolved =
+			resolveModelAndEffort(
+				activeFamilyOrModel,
+				selectedEffort,
+				{ preferExplicitEffort: true }
+			) ?? resolveBuiltinAnthropicModel(activeFamilyOrModel, selectedEffort);
 		if (resolved) {
 			activeFamilyOrModel = resolved.familyId;
 			activeEffort = resolved.effort;
@@ -327,11 +331,12 @@ export function syncClaudeModelPickerSettings({
 	fs.writeFileSync(tmpPath, `${JSON.stringify(updated, null, 2)}\n`, "utf8");
 	fs.renameSync(tmpPath, settingsPath);
 
-	const effectiveResolved = resolveModelAndEffort(
-		activeFamilyOrModel,
-		activeEffort,
-		{ preferExplicitEffort: true }
-	);
+	const effectiveResolved =
+		resolveModelAndEffort(
+			activeFamilyOrModel,
+			activeEffort,
+			{ preferExplicitEffort: true }
+		) ?? resolveBuiltinAnthropicModel(activeFamilyOrModel, activeEffort);
 
 	return {
 		kind: "ok",
@@ -340,9 +345,10 @@ export function syncClaudeModelPickerSettings({
 		activeEffort,
 		resolvedModelSlug: effectiveResolved?.modelSlug ?? null,
 		routingMode: effectiveResolved?.mode ?? "pinned",
-		availableFamilies: MODEL_FAMILY_CATALOG.map((f) => ({
+		availableFamilies: [...ANTHROPIC_BUILTIN_CATALOG, ...MODEL_FAMILY_CATALOG].map((f) => ({
 			familyId: f.familyId,
 			label: f.label,
+			provider: f.provider,
 			defaultEffort: f.defaultEffort,
 			supportedEfforts: f.supportedEfforts,
 			variantsByEffort: f.variantsByEffort,
@@ -385,6 +391,29 @@ export function resolveGatewayCandidates({
 			makeGatewayTarget("gemini-3.8-flash-low"),
 			makeGatewayTarget("gemini-4-argon-low"),
 		].filter(Boolean);
+	}
+
+	const builtinSelection = resolveBuiltinAnthropicModel(rawModel, rawEffort);
+	if (builtinSelection && builtinSelection.familyId !== "default") {
+		const mappedFamilyId =
+			builtinSelection.familyId === "opus" || builtinSelection.familyId === "fable"
+				? "agy-opus-5-5"
+				: builtinSelection.familyId === "sonnet"
+					? "agy-sonnet-5-5"
+					: "gemini-3.8-flash";
+		const primaryAgy = resolveModelAndEffort(mappedFamilyId, builtinSelection.effort);
+		const backupArgon = resolveModelAndEffort("gemini-4-argon", builtinSelection.effort);
+		const candidates = [
+			primaryAgy?.modelSlug ? makeGatewayTarget(primaryAgy.modelSlug, primaryAgy.effort) : null,
+			backupArgon?.modelSlug ? makeGatewayTarget(backupArgon.modelSlug, backupArgon.effort) : null,
+			...fallbackSlugs.map((s) => makeGatewayTarget(s)),
+		].filter(Boolean);
+		const seen = new Set();
+		return candidates.filter((c) => {
+			if (seen.has(c.modelSlug)) return false;
+			seen.add(c.modelSlug);
+			return true;
+		});
 	}
 
 	let latestUserPrompt = "Assist with the current software engineering task.";
@@ -731,7 +760,7 @@ export function startAnthropicGatewayServer({
 			res.end(
 				JSON.stringify({
 					object: "list",
-					data: MODEL_FAMILY_CATALOG.map((entry) => ({
+					data: [...ANTHROPIC_BUILTIN_CATALOG, ...MODEL_FAMILY_CATALOG].map((entry) => ({
 						id: entry.familyId,
 						type: "model",
 						display_name: entry.label,
@@ -795,6 +824,45 @@ export function startAnthropicGatewayServer({
 					res.end(JSON.stringify(formatAnthropicJsonResponse(respParams)));
 				}
 				return;
+			}
+
+			const googleSelection = resolveModelAndEffort(requestedModel, requestedEffort);
+			const hasClientAuth = Boolean(req.headers.authorization || req.headers["x-api-key"]);
+			const upstreamBaseUrl = rawEnv?.CLAUGLE_UPSTREAM_ANTHROPIC_URL || "https://api.anthropic.com";
+			if (!googleSelection && hasClientAuth && rawEnv?.CLAUGLE_DISABLE_UPSTREAM_PROXY !== "1") {
+				try {
+					const forwardedHeaders = {
+						"content-type": req.headers["content-type"] || "application/json",
+					};
+					for (const headerName of [
+						"authorization",
+						"x-api-key",
+						"anthropic-version",
+						"anthropic-beta",
+						"user-agent",
+						"x-app",
+					]) {
+						if (typeof req.headers[headerName] === "string") {
+							forwardedHeaders[headerName] = req.headers[headerName];
+						}
+					}
+					const upstreamRes = await fetch(`${upstreamBaseUrl}${req.url || "/v1/messages"}`, {
+						method: "POST",
+						headers: forwardedHeaders,
+						body: rawBody,
+						signal: AbortSignal.timeout(15_000),
+					});
+					if (upstreamRes.ok) {
+						const upstreamPayload = await upstreamRes.text();
+						res.writeHead(upstreamRes.status, {
+							"Content-Type":
+								upstreamRes.headers.get("content-type") ||
+								(stream ? "text/event-stream; charset=utf-8" : "application/json"),
+						});
+						res.end(upstreamPayload);
+						return;
+					}
+				} catch {}
 			}
 
 			const nowMs = Date.now();

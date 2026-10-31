@@ -180,6 +180,64 @@ const GEMINI_CLI_MODEL_SET = new Set(
 		.map((cap) => cap.slug)
 );
 
+export const ANTHROPIC_BUILTIN_CATALOG = Object.freeze([
+	Object.freeze({
+		familyId: "default",
+		label: "Default (Anthropic 기본 권장)",
+		description: "Anthropic 기본 모델 · 계정 유형에 맞춰 자동 선택 · 5시간 한도 초과 시 Google AI 자동 폴백",
+		behavesAs: "claude-opus-5-5",
+		provider: "claude-native",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({}),
+	}),
+	Object.freeze({
+		familyId: "opus",
+		label: "Opus (Anthropic 내장 · Claude Opus)",
+		description: "Anthropic 내장 최고 추론 모델 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-opus-5-5",
+		provider: "claude-native",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({}),
+	}),
+	Object.freeze({
+		familyId: "sonnet",
+		label: "Sonnet (Anthropic 내장 · Claude Sonnet)",
+		description: "Anthropic 내장 일상 코딩 모델 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-sonnet-5-5",
+		provider: "claude-native",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({}),
+	}),
+	Object.freeze({
+		familyId: "haiku",
+		label: "Haiku (Anthropic 내장 · Claude Haiku)",
+		description: "Anthropic 내장 초고속 경량 모델 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-haiku-5-5",
+		provider: "claude-native",
+		defaultEffort: "low",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({}),
+	}),
+	Object.freeze({
+		familyId: "fable",
+		label: "Fable (Anthropic 내장 · Claude Fable)",
+		description: "Anthropic 내장 심층 판단 모델 · 좌우 방향키로 Low/Medium/High 강도 선택",
+		behavesAs: "claude-fable-5-1",
+		provider: "claude-native",
+		defaultEffort: "high",
+		maxEffortLevel: "high",
+		supportedEfforts: Object.freeze(["low", "medium", "high"]),
+		variantsByEffort: Object.freeze({}),
+	}),
+]);
+
 export const MODEL_FAMILY_CATALOG = Object.freeze([
 	Object.freeze({
 		familyId: "gemini-4-argon",
@@ -303,6 +361,26 @@ const FAMILY_BY_ID = new Map(
 	MODEL_FAMILY_CATALOG.map((entry) => [entry.familyId, entry])
 );
 
+const BUILTIN_BY_ID = new Map(
+	ANTHROPIC_BUILTIN_CATALOG.map((entry) => [entry.familyId, entry])
+);
+
+const BUILTIN_ANTHROPIC_ALIAS_MAP = Object.freeze({
+	default: "default",
+	"anthropic-default": "default",
+	opus: "opus",
+	"claude-opus-5-5": "opus",
+	"claude-opus-4-6": "opus",
+	sonnet: "sonnet",
+	"claude-sonnet-5-5": "sonnet",
+	"claude-sonnet-4-6": "sonnet",
+	haiku: "haiku",
+	"claude-haiku-5-5": "haiku",
+	"claude-haiku-4-5-20251001": "haiku",
+	fable: "fable",
+	"claude-fable-5-1": "fable",
+});
+
 const FAMILY_ALIAS_MAP = Object.freeze({
 	auto: "claugle-auto",
 	"claugle-auto": "claugle-auto",
@@ -312,10 +390,8 @@ const FAMILY_ALIAS_MAP = Object.freeze({
 	"gemini-3.8-flash": "gemini-3.8-flash",
 	"agy-opus": "agy-opus-5-5",
 	"agy-opus-5-5": "agy-opus-5-5",
-	"claude-opus-5-5": "agy-opus-5-5",
 	"agy-sonnet": "agy-sonnet-5-5",
 	"agy-sonnet-5-5": "agy-sonnet-5-5",
-	"claude-sonnet-5-5": "agy-sonnet-5-5",
 	"gpt-oss": "gpt-oss-120b",
 	"gpt-oss-120b": "gpt-oss-120b",
 	"gemini-2.5-pro": "gemini-2.5-pro",
@@ -323,6 +399,26 @@ const FAMILY_ALIAS_MAP = Object.freeze({
 	"gemini-2.5-flash": "gemini-2.5-flash",
 	"gemini-flash": "gemini-2.5-flash",
 });
+
+export function resolveBuiltinAnthropicModel(rawModel, rawEffort) {
+	if (typeof rawModel !== "string") return null;
+	const cleaned = rawModel.trim().replace(/\[[^\]]+\]$/i, "").toLowerCase();
+	if (!cleaned) return null;
+	const builtinId = BUILTIN_ANTHROPIC_ALIAS_MAP[cleaned];
+	if (!builtinId) return null;
+	const entry = BUILTIN_BY_ID.get(builtinId);
+	if (!entry) return null;
+	const effort = normalizeEffortTier(rawEffort, entry.defaultEffort);
+	const clampedEffort = entry.supportedEfforts.includes(effort)
+		? effort
+		: entry.defaultEffort;
+	return {
+		mode: "claude-native",
+		familyId: entry.familyId,
+		modelSlug: cleaned,
+		effort: clampedEffort,
+	};
+}
 
 export const MODEL_ALIAS_MAP = Object.freeze({
 	argon: "gemini-4-argon-high",
@@ -444,6 +540,17 @@ export function buildClaudeModelPickerConfig() {
 	const options = [];
 	const modelSettings = {};
 
+	for (const builtin of ANTHROPIC_BUILTIN_CATALOG) {
+		modelSettings[builtin.familyId] = {
+			effortLevel: builtin.defaultEffort,
+			maxEffortLevel: builtin.maxEffortLevel,
+		};
+		modelSettings[builtin.behavesAs] = {
+			effortLevel: builtin.defaultEffort,
+			maxEffortLevel: builtin.maxEffortLevel,
+		};
+	}
+
 	for (const family of MODEL_FAMILY_CATALOG) {
 		options.push({
 			model: family.familyId,
@@ -559,7 +666,7 @@ export function buildClaudeModelPickerConfig() {
 
 	return {
 		modelPicker: {
-			replaceBuiltInOptions: true,
+			replaceBuiltInOptions: false,
 			options,
 		},
 		modelSettings,
