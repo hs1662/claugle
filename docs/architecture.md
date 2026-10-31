@@ -85,7 +85,7 @@ if (env.kind === "ok" && request.kind === "ok") {
 동시 실행 중 발생하는 공유 상태 경합은 두 곳에서 구조적으로 분리해 제거했습니다.
 
 - **프로세스별 JSONL 원장 샤드**: 각 실행 프로세스는 단일 파일에 락을 걸지 않고 `${CLAUDE_PLUGIN_DATA}/ledger/shard-${sessionId}-${pid}.jsonl`에 `UsageLedgerEvent` 한 줄을 추가합니다. `loadRollingQuotaSnapshot`이 읽기 시점에 샤드들을 모아 `TaskExecutionId` 기준으로 중복을 제거하며 `compactExpiredLedgerShards`가 `SessionStart` 훅에서 모든 이벤트가 14일을 넘긴 샤드만 지웁니다. 압축은 샤드를 다시 쓰지 않습니다. 지울 샤드는 먼저 다른 이름으로 옮긴 뒤 다시 읽어 그 사이에 추가된 이벤트를 원래 경로로 돌려놓고, `appendUsageEvent`는 기록한 파일이 아직 샤드 경로에 있는지 확인해 옮겨진 파일에 썼다면 다시 기록합니다.
-- **작업 단위 Git 워크트리 격리**: 호출자가 `allowFileEdits: true`로 편집을 허용한 `agy` 호출만 `${CLAUDE_PLUGIN_DATA}/worktrees/${taskId}`에 분리된 워크트리를 생성해 실행합니다. 실행 후 `harvestAndReleaseWorktree`가 변경된 파일 경로를 `allowedGlobs`와 대조하고 이상이 없으면 `git apply`로 호스트 작업 트리에만 반영하고 인덱스는 건드리지 않습니다. 워크트리에 중첩된 Git 저장소가 있으면 Git 명령을 실행하기 전에 거부하고, 하네스 설정(`.claude`, `.gemini`, `.mcp.json`, `agy` 설정 폴더 `.agents`·`.agent`·`_agents`·`_agent`, 지시 파일 `CLAUDE.md`·`CLAUDE.local.md`·`AGENTS.md`·`GEMINI.md`)이 바뀌었으면 glob과 상관없이 거부합니다. 호스트 작업 트리와 충돌할 경우에는 호스트 파일을 건드리지 않고 `claugle/task-${taskId}` 브랜치에 커밋을 남겨 작업 손실을 막습니다.
+- **작업 단위 Git 워크트리 격리**: 호출자가 `allowFileEdits: true`로 편집을 허용한 `agy` 호출만 `${CLAUDE_PLUGIN_DATA}/worktrees/${taskId}`에 분리된 워크트리를 생성해 실행합니다. 실행 후 `harvestAndReleaseWorktree`가 변경된 파일 경로를 `allowedGlobs`와 대조하고 이상이 없으면 `git apply`로 호스트 작업 트리에만 반영하고 인덱스는 건드리지 않습니다. 워크트리에 중첩된 Git 저장소가 있으면 Git 명령을 실행하기 전에 거부하고, 하네스 설정(`.claude`, `.gemini`, `.mcp.json`, `agy` 설정 폴더 `.agents`·`.agent`·`_agents`·`_agent`, 지시 파일 `CLAUDE.md`·`CLAUDE.local.md`·`AGENTS.md`·`GEMINI.md`와 그 링크 대상, `CLAUDE.md`가 `@`로 가져오는 파일)이 바뀌었으면 glob과 상관없이 거부합니다. 호스트 작업 트리와 충돌할 경우에는 호스트 파일을 건드리지 않고 `claugle/task-${taskId}` 브랜치에 커밋을 남겨 작업 손실을 막습니다.
 
 ## 3개 설계 후보 교차 심판 및 합성 결정
 

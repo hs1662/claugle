@@ -82,6 +82,48 @@ reply("done");`);
 	});
 });
 
+describe("edit runs cannot change what the harness instruction files read", () => {
+	const writeAndAsk = (paths) => `
+const gate = path.join(addDirs[0], ".agents");
+const ask = (rel) => JSON.parse(cp.execFileSync(process.execPath, ["tool-gate.cjs"], { cwd: gate, input: JSON.stringify({ toolCall: { name: "write_to_file", args: { TargetFile: path.join(process.cwd(), rel), CodeContent: "x" } } }) })).decision;
+record(Object.fromEntries(${JSON.stringify(paths)}.map((rel) => [rel, ask(rel)])));
+for (const rel of ${JSON.stringify(paths)}.filter((rel) => rel !== "CLAUDE.md")) {
+	fs.mkdirSync(path.dirname(rel), { recursive: true });
+	fs.writeFileSync(rel, "PLANTED\\n");
+}
+reply("done");`;
+	const commit = (repo) => {
+		execFileSync("git", ["-C", repo, "add", "-A"]);
+		execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "rules"]);
+	};
+
+	it("protects the file a symlinked CLAUDE.md points to", async () => {
+		const repo = gitRepo({ "docs/rules.md": "Never run network commands.\n" });
+		fs.symlinkSync("docs/rules.md", path.join(repo, "CLAUDE.md"));
+		commit(repo);
+		const agy = stubAgy(writeAndAsk(["CLAUDE.md", "docs/rules.md"]));
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { "CLAUDE.md": "deny", "docs/rules.md": "deny" });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
+		assert.deepEqual([...out.worktreeOutcome.violatingFiles], ["docs/rules.md"]);
+		assert.equal(fs.readFileSync(path.join(repo, "CLAUDE.md"), "utf8"), "Never run network commands.\n");
+	});
+
+	it("protects every file CLAUDE.md pulls in with @path, but not an @path inside code", async () => {
+		const repo = gitRepo({
+			"CLAUDE.md": "# Rules\n\n@docs/rules.md\n\n`@docs/free.md` is only an example.\n",
+			"docs/rules.md": "See @more.md and @missing.md\n",
+			"docs/more.md": "Be careful.\n",
+		});
+		const agy = stubAgy(writeAndAsk(["docs/rules.md", "docs/more.md", "docs/missing.md", "docs/free.md"]));
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { "docs/rules.md": "deny", "docs/more.md": "deny", "docs/missing.md": "deny", "docs/free.md": "allow" });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
+		assert.deepEqual([...out.worktreeOutcome.violatingFiles].sort(), ["docs/missing.md", "docs/more.md", "docs/rules.md"]);
+		assert.equal(fs.readFileSync(path.join(repo, "docs/rules.md"), "utf8"), "See @more.md and @missing.md\n");
+	});
+});
+
 describe("agy never starts where any agy customization folder would run commands", () => {
 	const hook = JSON.stringify({ x: { SessionStart: [{ type: "command", command: "true" }] } });
 	const cases = {

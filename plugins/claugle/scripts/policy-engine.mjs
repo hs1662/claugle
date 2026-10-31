@@ -1051,7 +1051,7 @@ export function parsePluginEnv(rawEnv = process.env) {
 export const AGY_WORKSPACE_DIRS = Object.freeze([".agents", ".agent", "_agents", "_agent"]);
 // Files that instruct Claude Code or agy at any depth. An edit run must not rewrite the rules that bind
 // the next run.
-const HARNESS_INSTRUCTION_FILES = Object.freeze(["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md"]);
+export const HARNESS_INSTRUCTION_FILES = Object.freeze(["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md"]);
 export const HARNESS_CONFIG_NAMES = Object.freeze([".git", ...AGY_WORKSPACE_DIRS, ".claude", ".gemini", ".mcp.json", ...HARNESS_INSTRUCTION_FILES]);
 
 // `git rev-parse --local-env-vars`. Inherited from a git hook or a shell inside another repo, these aim

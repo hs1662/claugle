@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { HARNESS_CONFIG_NAMES, createTaskExecutionId, isSafeTaskId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
+import { HARNESS_CONFIG_NAMES, HARNESS_INSTRUCTION_FILES, createTaskExecutionId, isSafeTaskId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -96,6 +96,45 @@ export function abortWorktreeLease(lease) {
 	forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
 }
 
+// Claude Code and agy read each instruction file, the file a symlinked one points to, and the files
+// CLAUDE.md pulls in with `@path` (five hops at most, never inside code). An edit run must leave all of
+// them as they were, including import targets that do not exist yet. Paths are relative to the
+// worktree root, as git prints them.
+const MAX_IMPORT_HOPS = 5;
+const IMPORT = /(?:^|\s)@((?!~)[^\s`]+)/g;
+
+function collectInstructionFiles(worktreePath) {
+	const root = fs.realpathSync(worktreePath);
+	const found = new Set();
+	const inside = (abs) => {
+		const rel = path.relative(root, abs);
+		return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : null;
+	};
+	const visit = (rel, hops) => {
+		if (found.has(rel)) return;
+		found.add(rel);
+		let text;
+		try {
+			const real = fs.realpathSync(path.join(root, rel));
+			const realRel = inside(real);
+			if (!realRel) return;
+			found.add(realRel);
+			text = fs.readFileSync(real, "utf8");
+		} catch {
+			return;
+		}
+		if (hops >= MAX_IMPORT_HOPS) return;
+		const prose = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
+		for (const [, target] of prose.matchAll(IMPORT)) {
+			const next = inside(path.resolve(path.dirname(path.join(root, rel)), target.replace(/[.,;:)]+$/, "")));
+			if (next) visit(next, hops + 1);
+		}
+	};
+	const tracked = runGit(root, ["ls-files", "-z"]).split("\0").filter(Boolean);
+	for (const rel of tracked) if (HARNESS_INSTRUCTION_FILES.includes(path.posix.basename(rel))) visit(rel, 0);
+	return found;
+}
+
 export function acquireWorktreeLease(params) {
 	if (params?.taskId !== undefined && !isSafeTaskId(params.taskId)) {
 		throw new Error(`Unsafe worktree task id: ${JSON.stringify(params.taskId)}`);
@@ -166,6 +205,7 @@ export function acquireWorktreeLease(params) {
 		baseCommitSha,
 		branchName,
 		allowedGlobs: Object.freeze(allowedGlobs),
+		instructionFiles: Object.freeze([...collectInstructionFiles(worktreePath)]),
 		applyStrategy,
 		createdAt,
 	});
@@ -224,10 +264,10 @@ export function harvestAndReleaseWorktree(arg) {
 		runWorktreeGit(lease, ["add", "-A"]);
 
 		// Plumbing output ignores user diff config and never quotes non-ASCII names.
-		const modifiedFiles = runWorktreeGit(lease, ["diff-index", "--cached", "--name-only", "-z", lease.baseCommitSha])
+		const changedFiles = runWorktreeGit(lease, ["diff-index", "--cached", "--name-only", "-z", lease.baseCommitSha])
 			.split("\0")
-			.filter(Boolean)
-			.map((file) => path.posix.relative(lease.cwdPrefix, file));
+			.filter(Boolean);
+		const modifiedFiles = changedFiles.map((file) => path.posix.relative(lease.cwdPrefix, file));
 
 		if (modifiedFiles.length === 0) {
 			forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
@@ -238,7 +278,10 @@ export function harvestAndReleaseWorktree(arg) {
 		}
 
 		const violatingFiles = modifiedFiles.filter(
-			(file) => file.split("/").some((name) => HARNESS_CONFIG_NAMES.includes(name)) || !matchesAllowedGlobs(file, lease.allowedGlobs)
+			(file, i) =>
+				lease.instructionFiles.includes(changedFiles[i]) ||
+				file.split("/").some((name) => HARNESS_CONFIG_NAMES.includes(name)) ||
+				!matchesAllowedGlobs(file, lease.allowedGlobs)
 		);
 
 		if (violatingFiles.length > 0) {
