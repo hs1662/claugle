@@ -212,10 +212,13 @@ function resolveReal(target) {
 }
 function namesForbidden(file, roots, forbiddenNames) {
 	const root = roots.find((r) => file === r || file.startsWith(r + path.sep));
-	return root !== undefined && path.relative(root, file).split(path.sep).some((name) => forbiddenNames.includes(name));
+	const forbidden = forbiddenNames.map((name) => name.toLowerCase());
+	return root !== undefined && path.relative(root, file).split(path.sep).some((name) => forbidden.includes(name.toLowerCase()));
 }
 function isProtected(file, files, dirs) {
-	return files.includes(file) || dirs.some((dir) => file === dir || file.startsWith(dir + path.sep));
+	const lower = file.toLowerCase();
+	const within = (protectedPath) => protectedPath.toLowerCase() === lower || protectedPath.toLowerCase().startsWith(lower + path.sep);
+	return files.some(within) || dirs.some((dir) => within(dir) || lower.startsWith(dir.toLowerCase() + path.sep));
 }
 function allowedPath(target, roots, forbiddenNames, protectedFiles, protectedDirs) {
 	if (target.split(/[\\/]/).includes("..")) return false;

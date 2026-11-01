@@ -162,18 +162,60 @@ reply("done");`;
 			links: { ".claude": "config/claude" },
 			targets: ["config/claude/settings.json", "config/claude/rules/evil.md"],
 		},
+		"the middle link of a symlinked .claude chain": { files: { "config/claude/settings.json": "{}\n" }, links: { ".claude": "cfg", cfg: "config/claude" }, targets: ["cfg"] },
+		"the folder a symlinked .claude/rules points to": {
+			files: { "shared/rules/security.md": rules },
+			links: { ".claude/rules": "../shared/rules" },
+			targets: ["shared/rules/security.md", "shared/rules/evil.md"],
+		},
+		"the file a symlinked .claude/settings.json points to": { files: { "config/settings.json": "{}\n" }, links: { ".claude/settings.json": "../config/settings.json" }, targets: ["config/settings.json"] },
+		"the scripts .claude/settings.json hooks run": {
+			files: {
+				".claude/settings.json": JSON.stringify({
+					hooks: {
+						SessionStart: [{ hooks: [{ type: "command", command: '"$CLAUDE_PROJECT_DIR"/scripts/session-start.sh' }] }],
+						PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node scripts/guard.js" }] }],
+					},
+				}),
+				"scripts/session-start.sh": "echo hi\n",
+				"scripts/guard.js": "\n",
+			},
+			targets: ["scripts/session-start.sh", "scripts/guard.js"],
+		},
+		"the script an .mcp.json server runs": {
+			files: { ".mcp.json": JSON.stringify({ mcpServers: { tools: { command: "node", args: ["tools/server.js"] } } }), "tools/server.js": "\n" },
+			targets: ["tools/server.js"],
+		},
+		"the path Claude Code reads when a backslash cuts an import": { files: { "CLAUDE.md": "@docs/api\\_ref.md and @notes\\#2.md\n" }, targets: ["docs/api", "notes"] },
+		"an import in an instruction file over 1 MiB": { files: { "CLAUDE.md": `${"x".repeat(1100000)}\n@docs/policy.md\n`, "docs/policy.md": rules }, targets: ["docs/policy.md"] },
+		"a case variant of an instruction file, a harness folder and an import": {
+			files: { "CLAUDE.md": "@docs/guide.md\n", "docs/guide.md": rules },
+			targets: ["Claude.md", ".Claude/settings.json", "docs/Guide.md"],
+		},
+		"a missing import target whose folder the run plants as a symlink": {
+			files: { "CLAUDE.md": "@docs/rules.md\n" },
+			targets: ["docs/rules.md"],
+			plant: `fs.mkdirSync("evil"); fs.writeFileSync("evil/rules.md", "PLANTED\\n"); fs.symlinkSync("evil", "docs");`,
+		},
 	};
-	const askThenWrite = (targets) => `
+	const askThenWrite = (targets, plant) => `
 const gate = path.join(addDirs[0], ".agents");
 const ask = (rel) => JSON.parse(cp.execFileSync(process.execPath, ["tool-gate.cjs"], { cwd: gate, input: JSON.stringify({ toolCall: { name: "write_to_file", args: { TargetFile: path.join(process.cwd(), rel), CodeContent: "x" } } }) })).decision;
 record(Object.fromEntries(${JSON.stringify(targets)}.map((rel) => [rel, ask(rel)])));
-for (const rel of ${JSON.stringify(targets)}) {
+${
+		plant ??
+		`for (const rel of ${JSON.stringify(targets)}) {
 	if (fs.lstatSync(rel, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(rel);
 	fs.mkdirSync(path.dirname(rel), { recursive: true });
 	fs.writeFileSync(rel, "PLANTED\\n");
-}
+}`
+	}
 reply("done");`;
-	const read = (file) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null);
+	const read = (file) => {
+		const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+		if (!stat) return null;
+		return stat.isSymbolicLink() ? `-> ${fs.readlinkSync(file)}` : stat.isFile() ? fs.readFileSync(file, "utf8") : "(folder)";
+	};
 	for (const [name, c] of Object.entries(cases)) {
 		it(`protects ${name}`, async () => {
 			const repo = gitRepo(c.files);
@@ -185,13 +227,53 @@ reply("done");`;
 			for (const [rel, body] of Object.entries(c.host?.(repo) ?? {})) fs.writeFileSync(path.join(repo, rel), body);
 			if (c.commitHost) commit(repo);
 			const before = c.targets.map((rel) => read(path.join(repo, rel)));
-			const agy = stubAgy(askThenWrite(c.targets));
+			const agy = stubAgy(askThenWrite(c.targets, c.plant));
 			const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
 			assert.deepEqual(agy.recorded(), Object.fromEntries(c.targets.map((rel) => [rel, "deny"])));
 			assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
 			assert.deepEqual(c.targets.map((rel) => read(path.join(repo, rel))), before);
 		});
 	}
+
+	it("protects user-level Claude Code files that link into the repo, and the scripts user hooks and MCP servers run", async () => {
+		const repo = gitRepo({ "claude/settings.json": "{}\n", "claude/skills/deploy/SKILL.md": "deploy\n", "tools/k.py": "\n", "tools/mcp.js": "\n" });
+		const home = tmp("claugle-iso-home-");
+		fs.mkdirSync(path.join(home, ".claude"));
+		fs.symlinkSync(path.join(repo, "claude/skills"), path.join(home, ".claude/skills"));
+		fs.symlinkSync(path.join(repo, "claude/settings.json"), path.join(home, ".claude/settings.local.json"));
+		fs.writeFileSync(path.join(home, ".claude/settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `python3 ${repo}/tools/k.py` }] }] } }));
+		fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ projects: { [repo]: { mcpServers: { local: { command: "node", args: ["tools/mcp.js"] } } } } }));
+		const targets = ["claude/settings.json", "claude/skills/deploy/SKILL.md", "tools/k.py", "tools/mcp.js"];
+		const agy = stubAgy(askThenWrite(targets));
+		const savedHome = process.env.HOME;
+		process.env.HOME = home;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			process.env.HOME = savedHome;
+		}
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, "tools/k.py"), "utf8"), "\n");
+	});
+
+	it("an instruction file over 8 MiB hands the edit back to Claude Code instead of guessing", async () => {
+		const repo = gitRepo({ "CLAUDE.md": "x".repeat(9 * 1024 * 1024) });
+		const agy = stubAgy(`reply("done");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.status, "DELEGATE_TO_HOST");
+		assert.equal(agy.started(), false);
+	});
+
+	it("one very long @ token does not stall the edit run", async () => {
+		const repo = gitRepo({ "CLAUDE.md": `@${"a/".repeat(40000)}x.md\n` });
+		const agy = stubAgy(`fs.writeFileSync("notes.txt", "hi\\n"); reply("done");`);
+		const started = Date.now();
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "add notes", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.worktreeOutcome?.kind, "applied-to-host");
+		assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+	});
 
 	it("an edit run in a repo whose file list passes 1 MiB still applies and leaves no worktree", async () => {
 		const deep = `${"d".repeat(120)}/${"e".repeat(120)}`;
