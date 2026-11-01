@@ -1,8 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { HARNESS_CONFIG_NAMES, HARNESS_INSTRUCTION_FILES, createTaskExecutionId, isSafeTaskId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
+import { SURFACE_PATHSPECS, collectHarnessSurface, isHarnessConfigName, isProtected } from "./harness-surface.mjs";
+import { createTaskExecutionId, isSafeTaskId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
@@ -98,209 +98,6 @@ export function abortWorktreeLease(lease) {
 	forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
 }
 
-// An edit run must leave every file Claude Code or agy reads as instructions as it was, and the folder a
-// symlinked harness config entry points to, or a script a harness config runs. Mirroring Claude Code's
-// loader exactly kept leaving gaps in review, so this reads more than Claude Code does: every `@` token
-// anywhere, code included, under several readings, in the host working tree that Claude Code reads (not
-// HEAD), through every symlink hop, and every path-like token in a harness JSON config, the user's
-// included. Scripts those paths load in turn are not followed. Paths are relative to the repo root.
-const MAX_IMPORT_HOPS = 5;
-const MAX_SCANNED_BYTES = 8 * 1024 * 1024;
-const PATH_MAX = 4096;
-const AT_TOKEN = /@((?:\\.|[^\s\\])+)/g;
-const CONFIG_TOKEN = /[^\s"'`;|&<>(){}[\],=]+/g;
-const SURFACE_PATHSPECS = [
-	...HARNESS_INSTRUCTION_FILES.map((name) => `:(glob,icase)**/${name}`),
-	...HARNESS_CONFIG_NAMES.flatMap((name) => [`:(glob)**/${name}`, `:(glob)**/${name}/**`]),
-	":(exclude,glob)**/.claude/worktrees/**",
-];
-
-function importReadings(token) {
-	const readings = new Set();
-	const atBackslash = token.split(/\\(?! )/)[0];
-	for (const cut of [token, token.split("#")[0], atBackslash, atBackslash.split("#")[0]]) {
-		for (const text of [cut, cut.replace(/\\(.)/g, "$1")]) {
-			for (const head of [text, text.split(/[)\]>"'`*]/)[0]]) {
-				readings.add(head);
-				readings.add(head.replace(/^[(<["'`*_]+/, "").replace(/[*_)\]}>`'".,;:!?]+$/, ""));
-			}
-		}
-	}
-	readings.delete("");
-	return readings;
-}
-
-function resolveExisting(abs) {
-	const rest = [];
-	for (let probe = abs; ; probe = path.dirname(probe)) {
-		try {
-			return path.join(fs.realpathSync(probe), ...rest);
-		} catch {
-			if (path.dirname(probe) === probe) return abs;
-			rest.unshift(path.basename(probe));
-		}
-	}
-}
-
-function linkChain(abs) {
-	const hops = [abs];
-	try {
-		for (let p = abs; hops.length < 40 && fs.lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink(); ) {
-			p = path.resolve(resolveExisting(path.dirname(p)), fs.readlinkSync(p));
-			hops.push(p);
-		}
-	} catch {}
-	return [...hops, ...hops.map(resolveExisting)];
-}
-
-// Symlinks in a user-level harness folder can point into the repo, as in a dotfiles repo.
-const USER_HARNESS_SUBDIRS = ["", "rules", "skills", "agents", "commands", "hooks", "output-styles", "plugins", "plugins/marketplaces"];
-
-// ~/.claude.json mostly holds history and caches; only its mcpServers entries run anything.
-function commandText(file, text) {
-	if (path.basename(file) !== ".claude.json") return text;
-	try {
-		const servers = [];
-		const walk = (value) => {
-			if (value && typeof value === "object") for (const [key, child] of Object.entries(value)) key === "mcpServers" ? servers.push(child) : walk(child);
-		};
-		walk(JSON.parse(text));
-		return JSON.stringify(servers);
-	} catch {
-		return text;
-	}
-}
-
-function filesUnder(dir) {
-	try {
-		return fs.readdirSync(dir, { recursive: true }).slice(0, 2000).map((name) => path.join(dir, name));
-	} catch {
-		return [];
-	}
-}
-
-function collectHarnessSurface(hostRepoRoot) {
-	const home = os.homedir();
-	const roots = [...new Set([hostRepoRoot, fs.realpathSync(hostRepoRoot)])];
-	const relOf = (abs) => {
-		for (const root of roots) {
-			const rel = path.relative(root, abs);
-			if (rel && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) return rel.split(path.sep).join("/");
-		}
-		return null;
-	};
-	const files = new Set();
-	const dirs = new Set();
-	const protectChain = (abs, into) => {
-		for (const rel of linkChain(abs).map(relOf)) if (rel) into.add(rel);
-	};
-	const scanConfig = (abs) => {
-		let text;
-		try {
-			text = fs.readFileSync(abs, "utf8");
-		} catch {
-			return;
-		}
-		const expanded = commandText(abs, text).replace(/\$\{?CLAUDE_PROJECT_DIR\}?/g, roots[0]).replaceAll('\\"', "");
-		const bases = [...new Set([...roots, path.dirname(abs), path.dirname(resolveExisting(abs))])];
-		for (const [token] of expanded.matchAll(CONFIG_TOKEN)) {
-			if (!/[/.]/.test(token)) continue;
-			const candidates = token.startsWith("~/") ? [path.join(home, token.slice(2))] : path.isAbsolute(token) ? [token] : bases.map((base) => path.resolve(base, token));
-			for (const candidate of candidates) if (candidate.length <= PATH_MAX && relOf(candidate)) protectChain(candidate, files);
-		}
-	};
-	const fewestHops = new Map();
-	const visit = (abs, hops) => {
-		if (abs.length > PATH_MAX || fewestHops.get(abs) <= hops) return;
-		fewestHops.set(abs, hops);
-		const chain = linkChain(abs);
-		for (const rel of chain.map(relOf)) if (rel) files.add(rel);
-		const real = chain.at(-1);
-		const stat = fs.statSync(real, { throwIfNoEntry: false });
-		if (!stat?.isFile()) return;
-		if (stat.size > MAX_SCANNED_BYTES) {
-			throw new Error(`${real} is over 8 MiB, so claugle cannot tell which files it imports and does not let agy edit this repo.`);
-		}
-		let text;
-		try {
-			text = fs.readFileSync(real, "utf8");
-		} catch {
-			return;
-		}
-		if (hops >= MAX_IMPORT_HOPS) return;
-		for (const [, token] of text.matchAll(AT_TOKEN)) {
-			for (const reading of importReadings(token)) {
-				if (reading.startsWith("~/")) visit(path.join(home, reading.slice(2)), hops + 1);
-				else if (path.isAbsolute(reading)) visit(path.resolve(reading), hops + 1);
-				else for (const base of new Set([path.dirname(abs), path.dirname(real)])) visit(path.resolve(base, reading), hops + 1);
-			}
-		}
-	};
-
-	const instructionName = (rel) => HARNESS_INSTRUCTION_FILES.some((name) => name.toLowerCase() === path.posix.basename(rel).toLowerCase());
-	const listed = runGit(hostRepoRoot, ["ls-files", "-z", "--cached", "--others", "--", ...SURFACE_PATHSPECS]).split("\0").filter(Boolean);
-	const read = (file) => {
-		if (file.endsWith(".md")) visit(file, 0);
-		if (file.endsWith(".json")) scanConfig(file);
-	};
-	const isLink = (abs) => fs.lstatSync(abs, { throwIfNoEntry: false })?.isSymbolicLink();
-	const followLink = (abs) => {
-		protectChain(abs, dirs);
-		const target = resolveExisting(abs);
-		for (const file of fs.statSync(target, { throwIfNoEntry: false })?.isDirectory() ? filesUnder(target) : [target]) read(file);
-	};
-	for (const rel of listed) {
-		const abs = path.join(hostRepoRoot, rel);
-		const inConfig = rel.split("/").some(isHarnessConfigName);
-		if (instructionName(rel)) visit(abs, 0);
-		if (!inConfig) continue;
-		read(abs);
-		if (isLink(abs)) followLink(abs);
-	}
-	const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
-	const outside = [
-		"/etc/claude-code/CLAUDE.md",
-		"/etc/claude-code/managed-settings.json",
-		path.join(home, ".claude.json"),
-		path.join(home, ".gemini", "GEMINI.md"),
-		...["CLAUDE.md", "settings.json", "settings.local.json", ".claude.json"].map((name) => path.join(claudeDir, name)),
-		...filesUnder(path.join(claudeDir, "rules")),
-	];
-	for (const top of [...roots.map(path.dirname), home]) {
-		for (let dir = top; ; dir = path.dirname(dir)) {
-			outside.push(...["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md"].map((name) => path.join(dir, name)));
-			outside.push(...["CLAUDE.md", "settings.json", "settings.local.json"].map((name) => path.join(dir, ".claude", name)));
-			outside.push(...filesUnder(path.join(dir, ".claude", "rules")));
-			if (path.dirname(dir) === dir) break;
-		}
-	}
-	for (const abs of outside) {
-		if (HARNESS_INSTRUCTION_FILES.includes(path.basename(abs))) visit(abs, 0);
-		else read(abs);
-	}
-	for (const harnessDir of new Set([claudeDir, path.join(home, ".claude"), path.join(home, ".gemini"), path.join(home, ".agents")])) {
-		for (const sub of USER_HARNESS_SUBDIRS) {
-			const dir = path.join(harnessDir, sub);
-			let names = [];
-			try {
-				names = fs.readdirSync(dir);
-			} catch {}
-			for (const entry of [dir, ...names.map((name) => path.join(dir, name))]) if (isLink(entry)) followLink(entry);
-		}
-	}
-	return { files: [...files], dirs: [...dirs] };
-}
-
-const isHarnessConfigName = (name) => HARNESS_CONFIG_NAMES.some((config) => config.toLowerCase() === name.toLowerCase());
-
-// Case is ignored because macOS and Windows filesystems ignore it. A change to a protected path's folder
-// counts too: replacing that folder with a symlink redirects it.
-function isProtected(file, { protectedFiles, protectedDirs }) {
-	const lower = file.toLowerCase();
-	const within = (protectedPath) => protectedPath.toLowerCase() === lower || protectedPath.toLowerCase().startsWith(`${lower}/`);
-	return protectedFiles.some(within) || protectedDirs.some((dir) => within(dir) || lower.startsWith(`${dir.toLowerCase()}/`));
-}
-
 export function acquireWorktreeLease(params) {
 	if (params?.taskId !== undefined && !isSafeTaskId(params.taskId)) {
 		throw new Error(`Unsafe worktree task id: ${JSON.stringify(params.taskId)}`);
@@ -354,7 +151,11 @@ export function acquireWorktreeLease(params) {
 		forceCleanupWorktree(hostRepoRoot, worktreePath);
 	}
 
-	const surface = collectHarnessSurface(hostRepoRoot);
+	const surface = collectHarnessSurface({
+		hostRepoRoot,
+		listed: runGit(hostRepoRoot, ["ls-files", "-z", "--cached", "--others", "--", ...SURFACE_PATHSPECS]).split("\0").filter(Boolean),
+		sessionProjectDir: params?.sessionProjectDir,
+	});
 	runGit(hostRepoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitSha]);
 	const gitDir = runGit(worktreePath, ["rev-parse", "--absolute-git-dir"]).trim();
 	const executionCwd = path.join(worktreePath, cwdPrefix);
@@ -448,7 +249,7 @@ export function harvestAndReleaseWorktree(arg) {
 		const violatingFiles = modifiedFiles.filter(
 			(file, i) =>
 				isProtected(changedFiles[i], lease) ||
-				file.split("/").some(isHarnessConfigName) ||
+				changedFiles[i].split("/").some(isHarnessConfigName) ||
 				!matchesAllowedGlobs(file, lease.allowedGlobs)
 		);
 

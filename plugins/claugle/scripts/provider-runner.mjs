@@ -210,15 +210,17 @@ function resolveReal(target) {
 	}
 	return path.join(probe, ...rest);
 }
+const fold = (name) => name.normalize("NFC").toLowerCase();
+// Names count from the worktree root, so an edit run started inside .claude still sees it.
 function namesForbidden(file, roots, forbiddenNames) {
-	const root = roots.find((r) => file === r || file.startsWith(r + path.sep));
-	const forbidden = forbiddenNames.map((name) => name.toLowerCase());
-	return root !== undefined && path.relative(root, file).split(path.sep).some((name) => forbidden.includes(name.toLowerCase()));
+	const root = [...CONFIG.nameRoots, ...roots].find((r) => file === r || file.startsWith(r + path.sep));
+	const forbidden = forbiddenNames.map(fold);
+	return root !== undefined && path.relative(root, file).split(path.sep).some((name) => forbidden.includes(fold(name)));
 }
 function isProtected(file, files, dirs) {
-	const lower = file.toLowerCase();
-	const within = (protectedPath) => protectedPath.toLowerCase() === lower || protectedPath.toLowerCase().startsWith(lower + path.sep);
-	return files.some(within) || dirs.some((dir) => within(dir) || lower.startsWith(dir.toLowerCase() + path.sep));
+	const folded = fold(file);
+	const within = (protectedPath) => fold(protectedPath) === folded || fold(protectedPath).startsWith(folded + path.sep);
+	return files.some(within) || dirs.some((dir) => within(dir) || folded.startsWith(fold(dir) + path.sep));
 }
 function allowedPath(target, roots, forbiddenNames, protectedFiles, protectedDirs) {
 	if (target.split(/[\\/]/).includes("..")) return false;
@@ -264,12 +266,13 @@ function writeFileIfChanged(filePath, content) {
 }
 
 // agy loads PreToolUse hooks from the .agents folder of every workspace root.
-export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], protectedFiles = [], protectedDirs = [], denyReason }) {
+export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], nameRoot, protectedFiles = [], protectedDirs = [], denyReason }) {
 	const agentsDir = path.join(dir, ".agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
 	const config = {
 		readRoots: readRoots.map((root) => fs.realpathSync(root)),
 		writeRoots: writeRoots.map((root) => fs.realpathSync(root)),
+		nameRoots: nameRoot ? [fs.realpathSync(nameRoot)] : [],
 		protectedFiles,
 		protectedDirs,
 		harnessConfigNames: HARNESS_CONFIG_NAMES,
@@ -944,6 +947,7 @@ export async function executeRoutedTask(params) {
 					pluginDataDir: env.pluginDataDir,
 					allowedGlobs: request.allowedEditGlobs,
 					applyStrategy: request.applyStrategy,
+					sessionProjectDir: env.projectDir,
 					nowMs,
 				});
 			} catch (err) {
@@ -972,6 +976,7 @@ export async function executeRoutedTask(params) {
 		writeAgyToolGate(gateDir, {
 			readRoots: [projectDir],
 			writeRoots: lease ? [projectDir] : [],
+			nameRoot: lease?.worktreePath,
 			protectedFiles: lease ? lease.protectedFiles.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
 			protectedDirs: lease ? lease.protectedDirs.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
 			denyReason: lease

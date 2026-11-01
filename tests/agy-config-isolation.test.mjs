@@ -192,6 +192,58 @@ reply("done");`;
 			files: { "CLAUDE.md": "@docs/guide.md\n", "docs/guide.md": rules },
 			targets: ["Claude.md", ".Claude/settings.json", "docs/Guide.md"],
 		},
+		"the scripts a subfolder project's hooks run": {
+			files: {
+				"packages/app/.claude/settings.json": JSON.stringify({
+					hooks: { SessionStart: [{ hooks: [{ type: "command", command: '"$CLAUDE_PROJECT_DIR"/scripts/guard.sh' }, { type: "command", command: "sh scripts/session.sh" }] }] },
+				}),
+				"packages/app/scripts/guard.sh": "\n",
+				"packages/app/scripts/session.sh": "\n",
+			},
+			targets: ["packages/app/scripts/guard.sh", "packages/app/scripts/session.sh"],
+		},
+		"the script a slash command runs with !": {
+			files: { ".claude/commands/notes.md": "---\nallowed-tools: Bash(sh scripts/notes.sh:*)\n---\n!`sh scripts/notes.sh`\n", "scripts/notes.sh": "\n" },
+			targets: ["scripts/notes.sh"],
+		},
+		"the scripts hooks name by module, without an extension, after cd, with a default, or under the repo top": {
+			files: {
+				".claude/settings.json": JSON.stringify({
+					hooks: {
+						Stop: [
+							{
+								hooks: [
+									"python3 -m hooks.guard",
+									"node scripts/guard",
+									'cd "$CLAUDE_PROJECT_DIR/tools" && sh ./check.sh',
+									'sh "${CLAUDE_PROJECT_DIR:-.}"/scripts/stop.sh',
+									'sh "$(git rev-parse --show-toplevel)/scripts/top.sh"',
+								].map((command) => ({ type: "command", command })),
+							},
+						],
+					},
+				}),
+				"hooks/guard.py": "\n",
+				"scripts/guard.js": "\n",
+				"tools/check.sh": "\n",
+				"scripts/stop.sh": "\n",
+				"scripts/top.sh": "\n",
+			},
+			targets: ["hooks/guard.py", "scripts/guard.js", "tools/check.sh", "scripts/stop.sh", "scripts/top.sh"],
+		},
+		"the script node runs for a folder, through its package.json": {
+			files: {
+				".mcp.json": JSON.stringify({ mcpServers: { notes: { command: "node", args: ["tools/notes"] } } }),
+				"tools/notes/package.json": JSON.stringify({ main: "server.js" }),
+				"tools/notes/server.js": "\n",
+			},
+			targets: ["tools/notes/server.js", "tools/notes/package.json"],
+		},
+		"an import whose name differs only in Unicode normalization": { files: { "CLAUDE.md": "@docs/caf\u00e9.md\n" }, targets: ["docs/cafe\u0301.md"] },
+		"the script a hook in a case variant of .claude runs": {
+			files: { ".Claude/settings.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "sh scripts/hook.sh" }] }] } }), "scripts/hook.sh": "\n" },
+			targets: ["scripts/hook.sh"],
+		},
 		"a missing import target whose folder the run plants as a symlink": {
 			files: { "CLAUDE.md": "@docs/rules.md\n" },
 			targets: ["docs/rules.md"],
@@ -256,6 +308,62 @@ reply("done");`;
 		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
 		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
 		assert.equal(fs.readFileSync(path.join(repo, "tools/k.py"), "utf8"), "\n");
+	});
+
+	it("protects .claude when the edit run's folder is .claude itself", async () => {
+		const repo = gitRepo({ ".claude/settings.json": "{}\n" });
+		const targets = ["settings.json", "settings.local.json", "rules/planted.md"];
+		const agy = stubAgy(askThenWrite(targets));
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: path.join(repo, ".claude") }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, ".claude/settings.json"), "utf8"), "{}\n");
+	});
+
+	it("protects scripts user configs reach through $HOME, PATH or a link from outside the repo, and user files linked two levels down", async () => {
+		const repo = gitRepo({ "bin/guard.sh": "\n", "bin/claude-ctx": "\n", "hooks/ctx.sh": "\n", "claude/commands/ops/release.md": "release\n" });
+		const home = tmp("claugle-iso-home-");
+		fs.symlinkSync(repo, path.join(home, "dotfiles"));
+		fs.symlinkSync(path.join(repo, "bin"), path.join(home, "bin"));
+		fs.mkdirSync(path.join(home, "pbin"));
+		fs.symlinkSync(path.join(repo, "bin/claude-ctx"), path.join(home, "pbin/claude-ctx"));
+		fs.mkdirSync(path.join(home, ".claude/commands/ops"), { recursive: true });
+		fs.symlinkSync(path.join(repo, "claude/commands/ops/release.md"), path.join(home, ".claude/commands/ops/release.md"));
+		const commands = ["sh ~/bin/guard.sh", "sh $HOME/dotfiles/hooks/ctx.sh", "claude-ctx"];
+		fs.writeFileSync(path.join(home, ".claude/settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: commands.map((command) => ({ type: "command", command })) }] } }));
+		const targets = ["bin/guard.sh", "hooks/ctx.sh", "bin/claude-ctx", "claude/commands/ops/release.md"];
+		const agy = stubAgy(askThenWrite(targets));
+		const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+		process.env.HOME = home;
+		process.env.PATH = `${path.join(home, "pbin")}${path.delimiter}${saved.PATH}`;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			Object.assign(process.env, saved);
+		}
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+	});
+
+	it("protects what the session project's instruction files import from the repo being edited", async () => {
+		const parent = tmp("claugle-iso-sib-");
+		const init = (name, files) => {
+			const dir = path.join(parent, name);
+			fs.mkdirSync(dir);
+			for (const [rel, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, rel), body);
+			execFileSync("git", ["-C", dir, "init", "-q"]);
+			commit(dir);
+			return dir;
+		};
+		const app = init("app", { "CLAUDE.md": "@../shared/conventions.md\n" });
+		const shared = init("shared", { "conventions.md": rules });
+		const agy = stubAgy(askThenWrite(["conventions.md"]));
+		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("claugle-iso-data-"), CLAUDE_PROJECT_DIR: app, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: shared }).value, env });
+		assert.deepEqual(agy.recorded(), { "conventions.md": "deny" });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(shared, "conventions.md"), "utf8"), rules);
 	});
 
 	it("an instruction file over 8 MiB hands the edit back to Claude Code instead of guessing", async () => {
