@@ -1,5 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
 	appendUsageEvent,
@@ -7,11 +9,15 @@ import {
 	loadRollingQuotaSnapshot,
 } from "./ledger-store.mjs";
 import {
+	AGY_WORKSPACE_DIRS,
 	DEFAULT_GOVERNOR_THRESHOLDS,
 	DEFAULT_POLICY_MATRIX,
+	HARNESS_CONFIG_NAMES,
 	MODEL_CAPABILITIES,
 	classifyTask,
 	createTaskExecutionId,
+	isSafeTaskId,
+	parseAbsolutePath,
 	parseAgyOutputJson,
 	parseGeminiCliOutputJson,
 	parsePluginEnv,
@@ -54,40 +60,57 @@ function resolveExecutableInPath(binName) {
 	return null;
 }
 
-function circuitFilePath(pluginDataDir, provider) {
-	return path.join(pluginDataDir, "ledger", `circuit-${provider}.json`);
+function writeJsonAtomic(file, value) {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	const tmpFile = `${file}.${process.pid}.tmp`;
+	fs.writeFileSync(tmpFile, JSON.stringify(value), "utf8");
+	fs.renameSync(tmpFile, file);
+}
+
+// agy quotas are per model, so a circuit opens for one quota pool and the provider keeps serving
+// its other pools. The provider as a whole is out only once every pool it serves is open.
+function circuitFilePath(pluginDataDir, provider, quotaPool) {
+	return path.join(pluginDataDir, "ledger", `circuit-${provider}-${quotaPool}.json`);
+}
+
+function poolsServedBy(provider) {
+	return [
+		...new Set(
+			Object.values(MODEL_CAPABILITIES)
+				.filter((cap) => cap.provider === provider)
+				.map((cap) => cap.quotaPool)
+		),
+	];
 }
 
 export function recordCircuitBreakerOpen({
 	pluginDataDir,
 	provider,
+	quotaPool,
 	binaryPath,
 	reason,
 	nowMs = Date.now(),
 	cooldownMs = DEFAULT_GOVERNOR_THRESHOLDS.circuitBreakerCooldownMs,
 }) {
 	if (!pluginDataDir) return;
-	const file = circuitFilePath(pluginDataDir, provider);
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	const state = {
+	writeJsonAtomic(circuitFilePath(pluginDataDir, provider, quotaPool), {
 		kind: "circuit-open",
+		quotaPool,
 		binaryPath,
 		openedAt: nowMs,
 		reopenAt: nowMs + cooldownMs,
 		reason,
-	};
-	fs.writeFileSync(file, JSON.stringify(state), "utf8");
+	});
 }
 
-function readCircuitState(pluginDataDir, provider, binaryPath, nowMs) {
+function readOpenCircuit(pluginDataDir, provider, quotaPool, nowMs) {
 	if (!pluginDataDir) return null;
-	const file = circuitFilePath(pluginDataDir, provider);
+	const file = circuitFilePath(pluginDataDir, provider, quotaPool);
 	try {
 		const raw = JSON.parse(fs.readFileSync(file, "utf8"));
 		if (raw && raw.kind === "circuit-open" && Number(raw.reopenAt) > nowMs) {
 			return Object.freeze({
-				kind: "circuit-open",
-				binaryPath,
+				quotaPool,
 				openedAt: Number(raw.openedAt),
 				reopenAt: Number(raw.reopenAt),
 				reason: raw.reason || "QUOTA_EXHAUSTED",
@@ -100,50 +123,312 @@ function readCircuitState(pluginDataDir, provider, binaryPath, nowMs) {
 	return null;
 }
 
+function healthOf(provider, desiredBin, pluginDataDir, nowMs) {
+	const binaryPath = resolveExecutableInPath(desiredBin);
+	if (!binaryPath) {
+		return Object.freeze({ kind: "unavailable", reason: `Executable "${desiredBin}" not found in PATH.` });
+	}
+	const pools = poolsServedBy(provider);
+	const openCircuits = Object.freeze(
+		pools.map((pool) => readOpenCircuit(pluginDataDir, provider, pool, nowMs)).filter(Boolean)
+	);
+	if (openCircuits.length === pools.length) {
+		return Object.freeze({
+			kind: "circuit-open",
+			binaryPath,
+			reopenAt: Math.min(...openCircuits.map((circuit) => circuit.reopenAt)),
+			reason: openCircuits[0].reason,
+			openCircuits,
+		});
+	}
+	return Object.freeze({ kind: "healthy", binaryPath, openCircuits });
+}
+
 export function detectProviderHealth(env = {}, nowMs = Date.now()) {
-	const agyDesired = env.agyBinOverride || process.env.CLAUGLE_AGY_BIN || "agy";
-	const geminiDesired = env.geminiBinOverride || process.env.CLAUGLE_GEMINI_BIN || "gemini";
-	const claudeBin = resolveExecutableInPath("claude") || "/usr/bin/claude";
-
-	const agyPath = resolveExecutableInPath(agyDesired);
-	const geminiPath = resolveExecutableInPath(geminiDesired);
-
-	let agyHealth;
-	if (!agyPath) {
-		agyHealth = Object.freeze({
-			kind: "unavailable",
-			reason: `Executable "${agyDesired}" not found in PATH.`,
-		});
-	} else {
-		const circuit = readCircuitState(env.pluginDataDir, "agy", agyPath, nowMs);
-		agyHealth = circuit ?? Object.freeze({ kind: "healthy", binaryPath: agyPath });
-	}
-
-	let geminiHealth;
-	if (!geminiPath) {
-		geminiHealth = Object.freeze({
-			kind: "unavailable",
-			reason: `Executable "${geminiDesired}" not found in PATH.`,
-		});
-	} else {
-		const circuit = readCircuitState(env.pluginDataDir, "gemini-cli", geminiPath, nowMs);
-		geminiHealth = circuit ?? Object.freeze({ kind: "healthy", binaryPath: geminiPath });
-	}
-
 	return Object.freeze({
 		"claude-native": Object.freeze({
 			kind: "healthy",
-			binaryPath: claudeBin,
+			binaryPath: resolveExecutableInPath("claude") || "/usr/bin/claude",
 		}),
-		agy: agyHealth,
-		"gemini-cli": geminiHealth,
+		agy: healthOf("agy", env.agyBinOverride || process.env.CLAUGLE_AGY_BIN || "agy", env.pluginDataDir, nowMs),
+		"gemini-cli": healthOf(
+			"gemini-cli",
+			env.geminiBinOverride || process.env.CLAUGLE_GEMINI_BIN || "gemini",
+			env.pluginDataDir,
+			nowMs
+		),
 	});
+}
+
+function isWithin(target, dir) {
+	const rel = path.relative(dir, target);
+	return rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+// Three layers bind a delegated run: the agent's tool list (writeAgyAgent), the PreToolUse gate
+// (writeAgyToolGate) and these deny rules. agy ignores `--mode plan` once slash commands are
+// disabled, and it honors only the actions command, read_file, write_file, read_url, mcp and
+// execute_url here; it logs and skips any other entry, unsandboxed included ("no longer a valid
+// rule, use command() instead"). `<action>(*)` matches every target and a path rule matches
+// everything under it.
+const AGY_ALWAYS_DENIED = Object.freeze(["command(*)", "mcp(*)", "read_url(*)", "execute_url(*)"]);
+
+// Headless agy refuses any write it would have to ask about, but it writes to the temp dir without
+// asking, and the host repo is the one place where a direct write would skip the glob check. A
+// wildcard deny cannot be narrowed by an allow rule.
+function agyDeniedPermissions(mode, cwd, hostRepoRoot) {
+	if (mode === "plan") {
+		return [...AGY_ALWAYS_DENIED, "write_file(*)"];
+	}
+	const outsideWorktree = [...new Set(["/tmp", os.tmpdir(), ...(hostRepoRoot ? [hostRepoRoot] : [])])].filter(
+		(dir) => !isWithin(cwd, dir)
+	);
+	return [...AGY_ALWAYS_DENIED, ...outsideWorktree.map((dir) => `write_file(${dir})`)];
+}
+
+const AGY_TOOL_GATE_SOURCE = `const fs = require("node:fs");
+const path = require("node:path");
+const CONFIG = __CONFIG__;
+const READ_TOOLS = new Set(["read_file", "view_file", "list_dir", "grep_search", "find_by_name", "search_in_file", "view_code_item", "view_file_outline"]);
+const WRITE_TOOLS = new Set(["write_file", "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"]);
+const PATH_KEY = /(path|file|dir|directory)$/i;
+function resolveReal(target) {
+	if (typeof target !== "string" || !path.isAbsolute(target)) return null;
+	let probe = path.resolve(target);
+	const rest = [];
+	for (;;) {
+		try {
+			probe = fs.realpathSync(probe);
+			break;
+		} catch {
+			if (fs.lstatSync(probe, { throwIfNoEntry: false })) return null;
+			const parent = path.dirname(probe);
+			if (parent === probe) return null;
+			rest.unshift(path.basename(probe));
+			probe = parent;
+		}
+	}
+	return path.join(probe, ...rest);
+}
+const fold = (name) => name.normalize("NFC").toLowerCase();
+// Names count from the worktree root, so an edit run started inside .claude still sees it.
+function namesForbidden(file, roots, forbiddenNames) {
+	const root = [...CONFIG.nameRoots, ...roots].find((r) => file === r || file.startsWith(r + path.sep));
+	const forbidden = forbiddenNames.map(fold);
+	return root !== undefined && path.relative(root, file).split(path.sep).some((name) => forbidden.includes(fold(name)));
+}
+function isProtected(file, files, dirs) {
+	const folded = fold(file);
+	const within = (protectedPath) => fold(protectedPath) === folded || fold(protectedPath).startsWith(folded + path.sep);
+	return files.some(within) || dirs.some((dir) => within(dir) || folded.startsWith(fold(dir) + path.sep));
+}
+function allowedPath(target, roots, forbiddenNames, protectedFiles, protectedDirs) {
+	if (target.split(/[\\/]/).includes("..")) return false;
+	const resolved = resolveReal(target);
+	if (!resolved || [resolved, path.resolve(target)].some((file) => isProtected(file, protectedFiles, protectedDirs))) return false;
+	if (!roots.some((r) => resolved === r || resolved.startsWith(r + path.sep))) return false;
+	// A symlink named CLAUDE.md resolves to a file with another name, so both names are checked.
+	return !namesForbidden(resolved, roots, forbiddenNames) && !namesForbidden(path.resolve(target), roots, forbiddenNames);
+}
+function allowedTargets(args, roots, forbiddenNames, protectedFiles = [], protectedDirs = []) {
+	try {
+		const targets = Object.entries(args || {})
+			.filter(([key, value]) => PATH_KEY.test(key) && typeof value === "string")
+			.map(([, value]) => value);
+		return targets.length > 0 && targets.every((target) => allowedPath(target, roots, forbiddenNames, protectedFiles, protectedDirs));
+	} catch {
+		return false;
+	}
+}
+let raw = "";
+process.stdin.on("data", (chunk) => (raw += chunk));
+process.stdin.on("end", () => {
+	let call = {};
+	try {
+		call = JSON.parse(raw).toolCall || {};
+	} catch {}
+	const name = typeof call.name === "string" ? call.name : "";
+	const allowed =
+		name === "finish" ||
+		(READ_TOOLS.has(name) && allowedTargets(call.args, CONFIG.readRoots.concat(CONFIG.writeRoots), [".git"])) ||
+		(WRITE_TOOLS.has(name) && allowedTargets(call.args, CONFIG.writeRoots, CONFIG.harnessConfigNames, CONFIG.protectedFiles, CONFIG.protectedDirs));
+	process.stdout.write(JSON.stringify(allowed ? { decision: "allow" } : { decision: "deny", reason: CONFIG.denyReason }));
+});
+`;
+
+function writeFileIfChanged(filePath, content) {
+	try {
+		if (fs.readFileSync(filePath, "utf8") === content) return;
+	} catch {}
+	const tmpPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+	fs.writeFileSync(tmpPath, content, "utf8");
+	fs.renameSync(tmpPath, filePath);
+}
+
+// agy loads PreToolUse hooks from the .agents folder of every workspace root.
+export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], nameRoot, protectedFiles = [], protectedDirs = [], denyReason }) {
+	const agentsDir = path.join(dir, ".agents");
+	fs.mkdirSync(agentsDir, { recursive: true });
+	const config = {
+		readRoots: readRoots.map((root) => fs.realpathSync(root)),
+		writeRoots: writeRoots.map((root) => fs.realpathSync(root)),
+		nameRoots: nameRoot ? [fs.realpathSync(nameRoot)] : [],
+		protectedFiles,
+		protectedDirs,
+		harnessConfigNames: HARNESS_CONFIG_NAMES,
+		denyReason,
+	};
+	writeFileIfChanged(path.join(agentsDir, "tool-gate.cjs"), AGY_TOOL_GATE_SOURCE.replace("__CONFIG__", () => JSON.stringify(config)));
+	const hooks = {
+		"claugle-tool-gate": {
+			PreToolUse: [
+				{ matcher: "*", hooks: [{ type: "command", command: `${JSON.stringify(process.execPath)} tool-gate.cjs`, timeout: 5 }] },
+			],
+		},
+	};
+	writeFileIfChanged(path.join(agentsDir, "hooks.json"), `${JSON.stringify(hooks, null, 2)}\n`);
+	return dir;
+}
+
+// agy walks up from each workspace root to the top of its git repo and loads every agy
+// customization folder on the way. A folder that is its own repo stops that walk; an empty .git
+// folder does not, so this runs a real `git init`.
+export function ensureOwnGitRepo(dir) {
+	const real = fs.realpathSync(dir);
+	const isTop = () => {
+		try {
+			return execFileSync("git", ["-C", real, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() === real;
+		} catch {
+			return false;
+		}
+	};
+	if (isTop()) return;
+	try {
+		execFileSync("git", ["init", "-q", real], { stdio: "ignore" });
+	} catch {}
+	if (!isTop()) {
+		throw new Error(`claugle could not make ${real} its own git repository, so agy would load agy customizations from the folders above it. agy was not started.`);
+	}
+}
+
+// agy reads rules, skills, plugins, agents, workflows, sidecars, hooks and MCP servers from many
+// places under ~/.gemini (GEMINI.md and AGENTS.md, config/, antigravity-cli/hooks.json). So agy runs
+// in a home that holds only the login token, linked so that agy's token refreshes reach the real
+// home; agy creates the rest of its state there itself. Without config/.migrated agy migrates
+// antigravity-cli/hooks.json on start.
+const AGY_HOME_LINKS = Object.freeze([".gemini/antigravity-cli/antigravity-oauth-token"]);
+const AGY_HOME_FILES = Object.freeze([".gemini/config/.migrated"]);
+
+// The old mirror linked entries only at these levels. Links agy makes deeper (its cli.log) stay, and
+// the cleanup does not grow with agy's conversation state.
+const AGY_HOME_MIRROR_DIRS = Object.freeze(["", ".gemini", ".gemini/config"]);
+
+function removeMirrorLinks(home) {
+	for (const rel of AGY_HOME_MIRROR_DIRS) {
+		let entries = [];
+		try {
+			entries = fs.readdirSync(path.join(home, rel), { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) fs.rmSync(path.join(home, rel, entry.name), { force: true });
+		}
+	}
+}
+
+export function prepareAgyHome(pluginDataDir, realHome = os.homedir()) {
+	const home = path.join(pluginDataDir, "agy-home");
+	fs.mkdirSync(home, { recursive: true });
+	const links = AGY_HOME_LINKS.map((rel) => ({ link: path.join(home, rel), target: path.join(realHome, rel) }));
+	const isLinked = ({ link, target }) => {
+		try {
+			return fs.readlinkSync(link) === target;
+		} catch {
+			return false;
+		}
+	};
+	removeMirrorLinks(home);
+	for (const { link, target } of links.filter((entry) => !isLinked(entry))) {
+		fs.mkdirSync(path.dirname(link), { recursive: true });
+		fs.rmSync(link, { recursive: true, force: true });
+		try {
+			fs.symlinkSync(target, link);
+		} catch (err) {
+			if (err?.code !== "EEXIST") throw err;
+		}
+	}
+	for (const rel of AGY_HOME_FILES) {
+		fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+		fs.closeSync(fs.openSync(path.join(home, rel), "a"));
+	}
+	return home;
+}
+
+// claugle runs agy as a custom agent whose prompt is one line and whose tools are only what the path
+// needs: the gateway needs finish to return its structured answer, delegated runs need file tools.
+// A custom agent otherwise inherits agy's default prompt sections and every rule, skill, agent and
+// plugin agy finds, global or the project's own AGENTS.md and GEMINI.md. excludeDefaultComponents
+// and the empty lists keep all of them out of the model's context while agy still runs the
+// PreToolUse gate, so Claude Code's harness, carried in the prompt, is the only rule set. The gate
+// folder is a second workspace root, so a delegated agent is told which root is the project;
+// otherwise the model starts in the gate folder.
+const AGY_READ_TOOLS = Object.freeze(["view_file", "list_dir", "grep_search", "find_by_name"]);
+const AGY_AGENT_PROFILES = Object.freeze({
+	"claugle-gateway": {
+		tools: ["finish"],
+		instructions: () => "Answer the request in the transcript. Claude Code runs every tool; ask for tools only through the response schema.",
+	},
+	"claugle-reader": {
+		tools: AGY_READ_TOOLS,
+		instructions: (projectDir) =>
+			`The project folder is ${projectDir}. Read the files you need there and answer. You cannot change files, run commands or use any other tool.`,
+	},
+	"claugle-editor": {
+		tools: [...AGY_READ_TOOLS, "write_to_file", "replace_file_content", "multi_replace_file_content"],
+		instructions: (projectDir) =>
+			`The project folder is ${projectDir}. Read and edit files only there. Make the requested change directly: list folders only to find a file the request does not name, and do not reread a file you just wrote. You cannot run commands or use any other tool.`,
+	},
+});
+const AGY_AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+export function writeAgyAgent(dir, profileName, projectDir) {
+	const profile = AGY_AGENT_PROFILES[profileName];
+	if (!profile) throw new Error(`Unknown claugle agy agent: ${profileName}`);
+	// A delegated run has the project as a workspace root, and agy takes an agent's definition from the
+	// root whose path sorts first. A project could define an agent under any fixed name, so a delegated
+	// run's agent gets a name the project cannot know in advance. The gateway has no project root.
+	const name = projectDir === undefined ? profileName : `${profileName}-${crypto.randomBytes(6).toString("hex")}`;
+	const agentDir = path.join(dir, ".agents", "agents", name);
+	fs.mkdirSync(agentDir, { recursive: true });
+	const body = [
+		"---",
+		`name: ${name}`,
+		"description: claugle worker",
+		"mainAgent: true",
+		"excludeDefaultComponents: true",
+		"skills: []",
+		"rules: []",
+		"agents: []",
+		"plugins: []",
+		"tools:",
+		...profile.tools.map((tool) => `  - ${tool}`),
+		"---",
+		"",
+		`# ${name}`,
+		"",
+		profile.instructions(projectDir),
+		"",
+	].join("\n");
+	writeFileIfChanged(path.join(agentDir, "agent.md"), body);
+	return name;
 }
 
 export function buildAgyCliArgs(invocation) {
 	if (!invocation || typeof invocation.prompt !== "string" || invocation.prompt.trim().length === 0) {
 		throw new Error("AgyCliInvocation requires a non-empty prompt.");
 	}
+	const mode = invocation.mode ?? "plan";
 	const resolved = resolveModelAndEffort(
 		invocation.modelSlug,
 		invocation.effort,
@@ -156,17 +441,23 @@ export function buildAgyCliArgs(invocation) {
 		invocation.effort ??
 		"high";
 	const args = [
-		"-p",
-		invocation.prompt,
+		"--input-format",
+		"stream-json",
+		"--output-format",
+		"stream-json",
 		"--model",
 		effectiveModelSlug,
 		"--effort",
 		effectiveEffort,
-		"--output-format",
-		"json",
 		"--disable-slash-commands",
 		"--mode",
-		invocation.mode ?? "plan",
+		mode,
+		"--settings",
+		JSON.stringify({
+			permissions: {
+				deny: agyDeniedPermissions(mode, path.resolve(invocation.cwd ?? process.cwd()), invocation.hostRepoRoot),
+			},
+		}),
 	];
 	if (invocation.jsonSchema) {
 		const serializedSchema =
@@ -182,7 +473,21 @@ export function buildAgyCliArgs(invocation) {
 			}
 		}
 	}
+	if (invocation.agent !== undefined) {
+		if (!AGY_AGENT_NAME.test(String(invocation.agent))) {
+			throw new Error(`Invalid agy agent name: ${JSON.stringify(invocation.agent)}`);
+		}
+		args.push("--agent", invocation.agent);
+	}
+	if (Number(invocation.timeoutMs) > 0) {
+		args.push("--print-timeout", `${Math.max(1, Math.ceil(Number(invocation.timeoutMs) / 1000))}s`);
+	}
+	args.push("-p=");
 	return Object.freeze(args);
+}
+
+function encodeAgyStreamInput(prompt) {
+	return `${JSON.stringify({ event: "user", message: { content: prompt } })}\n`;
 }
 
 export function buildGeminiCliArgs(invocation) {
@@ -199,10 +504,35 @@ export function buildGeminiCliArgs(invocation) {
 	]);
 }
 
-function classifyProviderFailure(combinedOutput) {
-	const text = String(combinedOutput || "");
+function providerFailureText(stdout, stderr) {
+	const parts = [stderr];
+	const collectErrors = (event) => {
+		const step = event?.step_update;
+		for (const err of [event?.error, event?.result?.error, step?.step_type === "tool" ? undefined : step?.error]) {
+			if (typeof err === "string") parts.push(err);
+			else if (err && typeof err === "object") parts.push(JSON.stringify(err));
+		}
+	};
+	try {
+		collectErrors(JSON.parse(stdout));
+		return parts.join("\n");
+	} catch {}
+	for (const line of stdout.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			collectErrors(JSON.parse(trimmed));
+		} catch {
+			parts.push(trimmed);
+		}
+	}
+	return parts.join("\n");
+}
+
+function classifyProviderFailure(failureText) {
+	const text = String(failureText || "");
 	if (
-		/quota[_\s-]*exhausted|resource_exhausted|weekly\s+limit|5-hour\s+limit|session\s+limit|hit\s+your.*limit|insufficient_quota|exceeded.*quota/i.test(
+		/quota[_\s-]*exhausted|exhausted\s+your\s+quota|quota\s+reached|resource_exhausted|weekly\s+limit|5-hour\s+limit|session\s+limit|hit\s+your.*limit|insufficient_quota|exceeded.*quota/i.test(
 			text
 		)
 	) {
@@ -215,6 +545,44 @@ function classifyProviderFailure(combinedOutput) {
 		return "AUTH_REQUIRED";
 	}
 	return "NON_ZERO_EXIT";
+}
+
+const KILL_GRACE_MS = 1_000;
+const EXIT_DRAIN_MS = 250;
+
+const liveProcessGroups = new Set();
+const TERMINATING_SIGNALS = Object.freeze(["SIGINT", "SIGTERM", "SIGHUP"]);
+
+function killLiveProcessGroups() {
+	for (const pid of liveProcessGroups) {
+		try {
+			process.kill(-pid, "SIGKILL");
+		} catch {}
+	}
+}
+
+function forwardTerminatingSignal(signal) {
+	killLiveProcessGroups();
+	for (const sig of TERMINATING_SIGNALS) process.removeListener(sig, forwardTerminatingSignal);
+	process.removeListener("exit", killLiveProcessGroups);
+	process.kill(process.pid, signal);
+}
+
+// agy runs in its own process group so a timeout can kill everything it started, which also
+// means a signal to the caller no longer reaches it. While any group is alive the caller passes
+// its own termination on, and agy's --print-timeout covers a caller killed with SIGKILL.
+function trackProcessGroup(pid) {
+	if (liveProcessGroups.size === 0) {
+		process.on("exit", killLiveProcessGroups);
+		for (const sig of TERMINATING_SIGNALS) process.on(sig, forwardTerminatingSignal);
+	}
+	liveProcessGroups.add(pid);
+}
+
+function untrackProcessGroup(pid) {
+	if (!liveProcessGroups.delete(pid) || liveProcessGroups.size > 0) return;
+	process.removeListener("exit", killLiveProcessGroups);
+	for (const sig of TERMINATING_SIGNALS) process.removeListener(sig, forwardTerminatingSignal);
 }
 
 export function runHeadlessProvider(params) {
@@ -237,6 +605,8 @@ export function runHeadlessProvider(params) {
 					outputFormat: "json",
 					disableSlashCommands: true,
 					cwd,
+					hostRepoRoot: params.hostRepoRoot,
+					agent: params.agent,
 					addDirs: params.addDirs,
 					jsonSchema: params.jsonSchema,
 					timeoutMs,
@@ -244,117 +614,171 @@ export function runHeadlessProvider(params) {
 
 	const startedAt = Date.now();
 
+	if (params.signal?.aborted) {
+		return Promise.resolve(
+			Object.freeze({ kind: "failure", reason: "CANCELLED", message: `${provider} run was cancelled before it started.`, exitCode: null, durationMs: 0 })
+		);
+	}
+
 	return new Promise((resolve) => {
 		let stdout = "";
 		let stderr = "";
+		let exitCode = null;
+		let spawnError = null;
 		let timedOut = false;
+		let cancelled = false;
 		let settled = false;
+		const timers = [];
 
-		const child = spawn(binaryPath, args, {
-			cwd,
-			env: {
-				...process.env,
-				CLAUGLE_HEADLESS_SUBPROCESS: "1",
-			},
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		const timer = setTimeout(() => {
-			timedOut = true;
-			if (child.exitCode === null && !child.killed) {
-				child.kill("SIGTERM");
-			}
-		}, timeoutMs);
-
-		child.stdout.on("data", (chunk) => {
-			stdout += chunk.toString("utf8");
-		});
-
-		child.stderr.on("data", (chunk) => {
-			stderr += chunk.toString("utf8");
-		});
-
-		child.on("error", (err) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			const durationMs = Math.max(0, Date.now() - startedAt);
+		let child;
+		try {
+			// Detached, agy and everything it starts form one process group that the runner can kill.
+			child = spawn(binaryPath, args, {
+				cwd,
+				env: {
+					...process.env,
+					CLAUGLE_HEADLESS_SUBPROCESS: "1",
+					// agy takes its workspace root from PWD, so it must name the folder claugle checked.
+					PWD: cwd,
+					...(provider === "agy" && params.agyHome ? { HOME: params.agyHome } : {}),
+					// agy --bg-updater could replace the binary the isolation was checked against. Only "true" turns it off; "1" does not.
+					...(provider === "agy" ? { AGY_CLI_DISABLE_AUTO_UPDATE: "true" } : {}),
+				},
+				stdio: [provider === "gemini-cli" ? "ignore" : "pipe", "pipe", "pipe"],
+				detached: true,
+			});
+		} catch (err) {
 			resolve(
 				Object.freeze({
 					kind: "failure",
 					reason: "NON_ZERO_EXIT",
-					message: `Failed to spawn ${binaryPath}: ${err.message}`,
+					message: `Failed to spawn ${binaryPath}: ${errorMessage(err)}`,
 					exitCode: null,
-					durationMs,
+					durationMs: Math.max(0, Date.now() - startedAt),
 				})
 			);
-		});
+			return;
+		}
 
-		child.on("close", (code) => {
+		const killGroup = (signal) => {
+			try {
+				process.kill(-child.pid, signal);
+			} catch {}
+		};
+		if (child.pid) trackProcessGroup(child.pid);
+
+		const outcome = () => {
+			if (spawnError) {
+				return {
+					kind: "failure",
+					reason: "NON_ZERO_EXIT",
+					message: `Failed to spawn ${binaryPath}: ${spawnError.message}`,
+					exitCode: null,
+				};
+			}
+			if (cancelled) {
+				return { kind: "failure", reason: "CANCELLED", message: `${provider} run was cancelled by its caller.`, exitCode };
+			}
+			if (timedOut) {
+				return { kind: "failure", reason: "TIMEOUT", message: `${provider} timed out after ${timeoutMs}ms.`, exitCode };
+			}
+			if (exitCode !== 0) {
+				const combined = `${stderr}\n${stdout}`.trim();
+				return {
+					kind: "failure",
+					reason: classifyProviderFailure(providerFailureText(stdout, stderr)),
+					message: combined || `${provider} exited with status ${exitCode}.`,
+					exitCode,
+				};
+			}
+			const parsed = provider === "gemini-cli" ? parseGeminiCliOutputJson(stdout) : parseAgyOutputJson(stdout);
+			if (parsed.kind === "error") {
+				const maybeQuota = classifyProviderFailure(providerFailureText(stdout, stderr));
+				return {
+					kind: "failure",
+					reason:
+						parsed.finishedReason === "print_timeout"
+							? "TIMEOUT"
+							: maybeQuota !== "NON_ZERO_EXIT"
+								? maybeQuota
+								: "MALFORMED_JSON",
+					message: parsed.message,
+					exitCode,
+				};
+			}
+			return { kind: "success", payload: parsed.value, stderr: stderr.trim() };
+		};
+
+		const settle = () => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
-			const durationMs = Math.max(0, Date.now() - startedAt);
+			for (const timer of timers) clearTimeout(timer);
+			if (child.pid) untrackProcessGroup(child.pid);
+			params.signal?.removeEventListener("abort", onAbort);
+			child.stdout.destroy();
+			child.stderr.destroy();
+			resolve(Object.freeze({ ...outcome(), durationMs: Math.max(0, Date.now() - startedAt) }));
+		};
 
-			if (timedOut) {
-				resolve(
-					Object.freeze({
-						kind: "failure",
-						reason: "TIMEOUT",
-						message: `${provider} timed out after ${timeoutMs}ms.`,
-						exitCode: code,
-						durationMs,
-					})
+		if (child.stdin) {
+			child.stdin.on("error", () => {});
+			child.stdin.end(encodeAgyStreamInput(params.prompt));
+		}
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+
+		function onAbort() {
+			if (settled) return;
+			cancelled = true;
+			killGroup("SIGTERM");
+			timers.push(
+				setTimeout(() => {
+					killGroup("SIGKILL");
+					settle();
+				}, KILL_GRACE_MS)
+			);
+		}
+		params.signal?.addEventListener("abort", onAbort, { once: true });
+
+		timers.push(
+			setTimeout(() => {
+				timedOut = true;
+				killGroup("SIGTERM");
+				timers.push(
+					setTimeout(() => {
+						killGroup("SIGKILL");
+						settle();
+					}, KILL_GRACE_MS)
 				);
-				return;
-			}
+			}, timeoutMs)
+		);
 
-			if (code !== 0) {
-				const combined = `${stderr}\n${stdout}`.trim();
-				const reason = classifyProviderFailure(combined);
-				resolve(
-					Object.freeze({
-						kind: "failure",
-						reason,
-						message: combined || `${provider} exited with status ${code}.`,
-						exitCode: code,
-						durationMs,
-					})
-				);
-				return;
-			}
-
-			const parsed =
-				provider === "gemini-cli"
-					? parseGeminiCliOutputJson(stdout)
-					: parseAgyOutputJson(stdout);
-
-			if (parsed.kind === "error") {
-				const combined = `${stderr}\n${stdout}`.trim();
-				const maybeQuota = classifyProviderFailure(combined);
-				const reason =
-					maybeQuota !== "NON_ZERO_EXIT" ? maybeQuota : "MALFORMED_JSON";
-				resolve(
-					Object.freeze({
-						kind: "failure",
-						reason,
-						message: parsed.message,
-						exitCode: code,
-						durationMs,
-					})
-				);
-				return;
-			}
-
-			resolve(
-				Object.freeze({
-					kind: "success",
-					payload: parsed.value,
-					durationMs,
-				})
+		child.on("error", (err) => {
+			spawnError = err;
+			settle();
+		});
+		child.on("exit", (code) => {
+			if (settled) return;
+			exitCode = code;
+			timers.push(
+				setTimeout(() => {
+					killGroup("SIGKILL");
+					settle();
+				}, EXIT_DRAIN_MS)
 			);
 		});
+		child.on("close", settle);
 	});
+}
+
+function errorMessage(err) {
+	return err instanceof Error ? err.message : String(err);
 }
 
 function isGitRepository(dirPath) {
@@ -374,13 +798,15 @@ function formatPromptWithContextFiles(request) {
 	}
 	const sections = [request.prompt, "", "Context files:"];
 	for (const relOrAbs of request.contextFiles) {
-		const resolved = path.isAbsolute(relOrAbs)
-			? relOrAbs
-			: path.resolve(request.cwd, relOrAbs);
 		try {
-			const stat = fs.statSync(resolved);
+			const real = fs.realpathSync(path.resolve(request.cwd, relOrAbs));
+			if (!isWithin(real, fs.realpathSync(request.cwd))) {
+				sections.push(`- ${relOrAbs} (not read: outside the task directory)`);
+				continue;
+			}
+			const stat = fs.statSync(real);
 			if (stat.isFile() && stat.size <= 128 * 1024) {
-				const content = fs.readFileSync(resolved, "utf8");
+				const content = fs.readFileSync(real, "utf8");
 				sections.push(`\n--- ${relOrAbs} ---\n${content}`);
 			} else {
 				sections.push(`- ${relOrAbs}`);
@@ -392,6 +818,50 @@ function formatPromptWithContextFiles(request) {
 	return sections.join("\n");
 }
 
+// agy runs commands from a workspace's customization folders: hooks.json files (plugin hooks
+// included), MCP server configs, and plugins found in place or registered in plugins.json. The
+// PreToolUse gate never sees those commands, so agy must not start in a workspace that has any of them.
+function findAgyCommandCustomization(workspace) {
+	const workspaceDir = fs.realpathSync(workspace);
+	let top = path.parse(workspaceDir).root;
+	try {
+		top =
+			execFileSync("git", ["-C", workspaceDir, "rev-parse", "--show-toplevel"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim() || top;
+	} catch {}
+	const commandRunning = (dir) => {
+		const pending = [dir];
+		while (pending.length > 0) {
+			const current = pending.pop();
+			let entries = [];
+			try {
+				entries = fs.readdirSync(current, { withFileTypes: true });
+			} catch {
+				continue;
+			}
+			for (const entry of entries) {
+				const full = path.join(current, entry.name);
+				// A symlink could lead anywhere agy follows it, so it counts as a customization too.
+				if (entry.isSymbolicLink() || ["hooks.json", "mcp_config.json", "plugins", "plugins.json"].includes(entry.name)) {
+					return full;
+				}
+				if (entry.isDirectory()) pending.push(full);
+			}
+		}
+		return null;
+	};
+	for (let dir = workspaceDir; ; dir = path.dirname(dir)) {
+		for (const name of AGY_WORKSPACE_DIRS) {
+			const customDir = path.join(dir, name);
+			const found = fs.lstatSync(customDir, { throwIfNoEntry: false })?.isSymbolicLink() ? customDir : commandRunning(customDir);
+			if (found) return found;
+		}
+		if (dir === path.resolve(top) || dir === path.dirname(dir)) return null;
+	}
+}
+
 export async function executeRoutedTask(params) {
 	const rawEnv = params.env?.pluginDataDir ? { kind: "ok", value: params.env } : parsePluginEnv(params.env);
 	if (rawEnv.kind === "error") {
@@ -399,7 +869,7 @@ export async function executeRoutedTask(params) {
 	}
 	const env = rawEnv.value;
 
-	const rawReq = params.request?.taskId && params.request?.cwd
+	const rawReq = isSafeTaskId(params.request?.taskId) && params.request?.cwd
 		? { kind: "ok", value: params.request }
 		: parseTaskRequest(params.request);
 	if (rawReq.kind === "error") {
@@ -431,28 +901,26 @@ export async function executeRoutedTask(params) {
 	const fullPrompt = formatPromptWithContextFiles(request);
 	const attemptedTargets = [];
 	const errors = [];
-
-	const hasExternalCandidate = plan.candidates.some(
-		(c) => c.provider !== "claude-native" && health[c.provider]?.kind === "healthy"
-	);
+	const outcome = (status, selectedTarget, responseText, extra = {}) =>
+		Object.freeze({
+			taskId: request.taskId,
+			status,
+			selectedTarget,
+			attemptedTargets: Object.freeze([...attemptedTargets]),
+			plan,
+			responseText,
+			...extra,
+		});
 
 	for (const candidate of plan.candidates) {
-		if (candidate.provider === "claude-native" && hasExternalCandidate) {
+		if (candidate.provider === "claude-native") {
 			continue;
 		}
 		attemptedTargets.push(candidate);
 
-		if (candidate.provider === "claude-native") {
-			return Object.freeze({
-				taskId: request.taskId,
-				status: "DELEGATE_TO_HOST",
-				selectedTarget: candidate,
-				attemptedTargets: Object.freeze(attemptedTargets),
-				plan,
-				responseText:
-					`[claugle] Delegated to host Claude Code session (${candidate.effort} effort). ` +
-					`QuotaState=${plan.quotaState}, TaskKind=${plan.classification.taskKind}.`,
-			});
+		if (candidate.provider === "gemini-cli") {
+			errors.push(`${candidate.modelSlug}: gemini-cli is not run because claugle cannot gate its tools.`);
+			continue;
 		}
 
 		const providerHealth = health[candidate.provider];
@@ -460,43 +928,92 @@ export async function executeRoutedTask(params) {
 			errors.push(`${candidate.provider} is not healthy (${providerHealth?.kind ?? "unknown"}).`);
 			continue;
 		}
-
-		let lease = null;
-		const useWorktree =
-			candidate.provider === "agy" &&
-			candidate.isolation.kind === "git-worktree" &&
-			isGitRepository(request.cwd);
-
-		if (useWorktree) {
-			lease = acquireWorktreeLease({
-				taskId: `${request.taskId}-${attemptedTargets.length}`,
-				hostRepoRoot: request.cwd,
-				pluginDataDir: env.pluginDataDir,
-				allowedGlobs: request.allowedEditGlobs,
-				applyStrategy: request.applyStrategy,
-				nowMs,
-			});
+		const openCircuit = providerHealth.openCircuits?.find((circuit) => circuit.quotaPool === candidate.quotaPool);
+		if (openCircuit) {
+			errors.push(
+				`${candidate.modelSlug}: ${candidate.quotaPool} is paused after ${openCircuit.reason} until ${new Date(openCircuit.reopenAt).toISOString()}.`
+			);
+			continue;
 		}
 
-		const executionCwd = lease ? lease.worktreePath : request.cwd;
-		const execResult = await runHeadlessProvider({
-			provider: candidate.provider,
-			binaryPath: providerHealth.binaryPath,
-			prompt: fullPrompt,
-			modelSlug: candidate.modelSlug,
-			effort: candidate.effort,
-			mode: candidate.agyMode,
-			cwd: executionCwd,
-			timeoutMs: candidate.timeoutMs,
-		});
+		let lease = null;
+		const useWorktree = candidate.isolation.kind === "git-worktree" && isGitRepository(request.cwd);
 
-		if (execResult.kind === "success") {
-			let worktreeOutcome;
-			if (lease) {
-				worktreeOutcome = harvestAndReleaseWorktree(lease);
+		if (useWorktree) {
+			try {
+				lease = acquireWorktreeLease({
+					taskId: `${request.taskId}-${attemptedTargets.length}`,
+					hostRepoRoot: request.cwd,
+					pluginDataDir: env.pluginDataDir,
+					allowedGlobs: request.allowedEditGlobs,
+					applyStrategy: request.applyStrategy,
+					sessionProjectDir: env.projectDir,
+					nowMs,
+				});
+			} catch (err) {
+				errors.push(`${candidate.modelSlug}: ${errorMessage(err)}`);
+				continue;
 			}
+		}
 
-			const appended = appendUsageEvent({
+		if (candidate.agyMode !== "plan" && !lease) {
+			errors.push(
+				`${candidate.modelSlug}: refused to let agy edit files outside a git worktree (${request.cwd} is not a git repository).`
+			);
+			continue;
+		}
+
+		const projectDir = lease ? lease.executionCwd : request.cwd;
+		const customization = findAgyCommandCustomization(projectDir);
+		if (customization) {
+			if (lease) abortWorktreeLease(lease);
+			errors.push(
+				`${candidate.modelSlug}: ${customization} would make agy run commands outside Claude Code's harness, so claugle does not start agy here.`
+			);
+			continue;
+		}
+		const gateDir = path.join(env.pluginDataDir, "agy-gates", `${request.taskId}-${attemptedTargets.length}`);
+		writeAgyToolGate(gateDir, {
+			readRoots: [projectDir],
+			writeRoots: lease ? [projectDir] : [],
+			nameRoot: lease?.worktreePath,
+			protectedFiles: lease ? lease.protectedFiles.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
+			protectedDirs: lease ? lease.protectedDirs.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
+			denyReason: lease
+				? `claugle: only file reads and writes under ${projectDir} are allowed, never in ${HARNESS_CONFIG_NAMES.join(", ")}. Use paths under ${projectDir}.`
+				: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,
+		});
+		const agyAgent = writeAgyAgent(gateDir, lease ? "claugle-editor" : "claugle-reader", projectDir);
+		try {
+			ensureOwnGitRepo(gateDir);
+		} catch (err) {
+			fs.rmSync(gateDir, { recursive: true, force: true });
+			if (lease) abortWorktreeLease(lease);
+			errors.push(`${candidate.modelSlug}: ${errorMessage(err)}`);
+			continue;
+		}
+		let execResult;
+		try {
+			execResult = await runHeadlessProvider({
+				provider: candidate.provider,
+				binaryPath: providerHealth.binaryPath,
+				prompt: fullPrompt,
+				modelSlug: candidate.modelSlug,
+				effort: candidate.effort,
+				mode: candidate.agyMode,
+				cwd: projectDir,
+				addDirs: [gateDir],
+				agyHome: prepareAgyHome(env.pluginDataDir),
+				agent: agyAgent,
+				hostRepoRoot: lease?.hostRepoRoot,
+				timeoutMs: candidate.timeoutMs,
+			});
+		} finally {
+			fs.rmSync(gateDir, { recursive: true, force: true });
+		}
+
+		const recordRunUsage = (status) =>
+			appendUsageEvent({
 				pluginDataDir: env.pluginDataDir,
 				event: {
 					eventId:
@@ -515,32 +1032,62 @@ export async function executeRoutedTask(params) {
 					cacheReadTokens: execResult.payload.usage.cacheReadTokens,
 					totalTokens: execResult.payload.usage.totalTokens,
 					durationMs: execResult.durationMs,
-					status: "SUCCESS",
+					status,
 				},
 			});
 
-			if (worktreeOutcome?.kind === "rejected-glob-violation") {
-				return Object.freeze({
-					taskId: request.taskId,
-					status: "FAILED",
-					selectedTarget: candidate,
-					attemptedTargets: Object.freeze(attemptedTargets),
-					plan,
-					responseText: `Rejected file edits outside allowed globs: ${worktreeOutcome.violatingFiles.join(", ")}`,
-					worktreeOutcome,
-					ledgerEvent: appended.event,
-				});
+		// Headless agy ends a turn it could only finish by asking (a write outside the workspace, say)
+		// with exit 0 and an empty response.
+		const stoppedEarly =
+			execResult.kind === "success" &&
+			!execResult.payload.response.trim() &&
+			!execResult.payload.structuredOutput;
+
+		if (execResult.kind === "success" && !stoppedEarly) {
+			let worktreeOutcome;
+			if (lease) {
+				try {
+					worktreeOutcome = harvestAndReleaseWorktree(lease);
+				} catch (err) {
+					worktreeOutcome = Object.freeze({ kind: "harvest-failed", message: errorMessage(err), worktreeCleanedUp: true });
+				}
 			}
 
-			return Object.freeze({
-				taskId: request.taskId,
-				status: "COMPLETED",
-				selectedTarget: candidate,
-				attemptedTargets: Object.freeze(attemptedTargets),
-				plan,
-				responseText: execResult.payload.response,
+			const ledgerEvent = recordRunUsage("SUCCESS").event;
+
+			if (worktreeOutcome?.kind === "rejected-nested-git") {
+				return outcome(
+					"FAILED",
+					candidate,
+					`Rejected agy's edits because they contain nested git repositories: ${worktreeOutcome.nestedGitPaths.join(", ")}`,
+					{ worktreeOutcome, ledgerEvent }
+				);
+			}
+			if (worktreeOutcome?.kind === "rejected-glob-violation") {
+				return outcome(
+					"FAILED",
+					candidate,
+					`Rejected file edits outside allowed globs: ${worktreeOutcome.violatingFiles.join(", ")}`,
+					{ worktreeOutcome, ledgerEvent }
+				);
+			}
+			if (worktreeOutcome?.kind === "harvest-failed") {
+				return outcome("FAILED", candidate, `claugle could not collect agy's edits: ${worktreeOutcome.message}`, {
+					worktreeOutcome,
+					ledgerEvent,
+				});
+			}
+			const notApplied =
+				worktreeOutcome?.kind === "preserved-on-branch"
+					? `\n\n[claugle] These edits were not applied to your working tree (${worktreeOutcome.reason}). They are preserved on branch ${worktreeOutcome.branchName}.`
+					: "";
+			const substituted =
+				request.preferredModel && candidate.modelSlug !== request.preferredModel
+					? `[claugle] ${request.preferredModel} did not answer, so ${candidate.modelSlug} answered instead. ${errors.join(" | ")}\n\n`
+					: "";
+			return outcome("COMPLETED", candidate, `${substituted}${execResult.payload.response}${notApplied}`, {
 				...(worktreeOutcome ? { worktreeOutcome } : {}),
-				ledgerEvent: appended.event,
+				ledgerEvent,
 			});
 		}
 
@@ -548,11 +1095,28 @@ export async function executeRoutedTask(params) {
 			abortWorktreeLease(lease);
 		}
 
+		if (stoppedEarly) {
+			recordRunUsage("ERROR");
+			errors.push(
+				`${candidate.provider}:${candidate.modelSlug} stopped without a response: ${execResult.stderr || "empty response."}`
+			);
+			continue;
+		}
+
 		errors.push(
 			`${candidate.provider}:${candidate.modelSlug} failed (${execResult.reason}): ${execResult.message}`
 		);
 
 		if (execResult.reason === "QUOTA_EXHAUSTED" || execResult.reason === "RATE_LIMITED") {
+			recordCircuitBreakerOpen({
+				pluginDataDir: env.pluginDataDir,
+				provider: candidate.provider,
+				quotaPool: candidate.quotaPool,
+				binaryPath: providerHealth.binaryPath,
+				reason: execResult.reason,
+				nowMs,
+				cooldownMs: thresholds.circuitBreakerCooldownMs,
+			});
 			appendUsageEvent({
 				pluginDataDir: env.pluginDataDir,
 				event: {
@@ -569,41 +1133,169 @@ export async function executeRoutedTask(params) {
 					cacheReadTokens: 0,
 					totalTokens: 0,
 					durationMs: execResult.durationMs,
-					status: "QUOTA_EXHAUSTED",
+					status: execResult.reason === "QUOTA_EXHAUSTED" ? "QUOTA_EXHAUSTED" : "ERROR",
 				},
 			});
 		}
 	}
 
-	const fallbackTarget = attemptedTargets[attemptedTargets.length - 1] ?? plan.candidates[0];
-	return Object.freeze({
-		taskId: request.taskId,
-		status: "FAILED",
-		selectedTarget: fallbackTarget,
-		attemptedTargets: Object.freeze(attemptedTargets),
-		plan,
-		responseText: `All routed candidates failed. Errors: ${errors.join(" | ")}`,
-	});
+	const hostCandidate = plan.candidates.find((candidate) => candidate.provider === "claude-native");
+	if (hostCandidate) {
+		attemptedTargets.push(hostCandidate);
+		const failures = errors.length > 0 ? ` External candidates failed: ${errors.join(" | ")}` : "";
+		return outcome(
+			"DELEGATE_TO_HOST",
+			hostCandidate,
+			`[claugle] Delegated to host Claude Code session (${hostCandidate.effort} effort). ` +
+				`QuotaState=${plan.quotaState}, TaskKind=${plan.classification.taskKind}.${failures}`
+		);
+	}
+
+	return outcome(
+		"FAILED",
+		attemptedTargets[attemptedTargets.length - 1] ?? plan.candidates[0],
+		`All routed candidates failed. Errors: ${errors.join(" | ")}`
+	);
 }
 
-function persistPluginDataEnvVar(envFile, pluginDataDir) {
+const BUDGET_ENV_BY_POOL = Object.freeze({
+	"claude-code-native": "CLAUGLE_CLAUDE_WEEKLY_TOKEN_BUDGET",
+	"agy-claude-pool": "CLAUGLE_AGY_CLAUDE_WEEKLY_TOKEN_BUDGET",
+	"agy-gemini-pool": "CLAUGLE_AGY_GEMINI_WEEKLY_TOKEN_BUDGET",
+	"gemini-cli-pool": "CLAUGLE_GEMINI_CLI_WEEKLY_TOKEN_BUDGET",
+});
+
+// Bash commands launched by slash commands and agents get neither CLAUDE_PLUGIN_DATA nor the
+// CLAUDE_PLUGIN_OPTION_* values, so they would read another ledger with default budgets.
+function persistPluginDataEnvVar(envFile, pluginDataDir, weeklyBudgets = {}) {
 	if (!envFile) return false;
 	const parentDir = path.dirname(envFile);
 	if (!fs.existsSync(parentDir)) return false;
 	const existing = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf8") : "";
-	const linesToAdd = [];
-	if (!existing.includes("CLAUDE_PLUGIN_DATA=")) {
-		linesToAdd.push(`export CLAUDE_PLUGIN_DATA=${JSON.stringify(pluginDataDir)}`);
+	const exports = [["CLAUDE_PLUGIN_DATA", pluginDataDir]];
+	for (const [pool, name] of Object.entries(BUDGET_ENV_BY_POOL)) {
+		if (Number.isInteger(weeklyBudgets[pool])) exports.push([name, String(weeklyBudgets[pool])]);
 	}
-	if (!existing.includes("ANTHROPIC_BASE_URL=")) {
-		const gatewayPort = process.env.CLAUGLE_GATEWAY_PORT || "18789";
-		linesToAdd.push(`export ANTHROPIC_BASE_URL=${JSON.stringify(`http://127.0.0.1:${gatewayPort}`)}`);
-	}
-	if (linesToAdd.length > 0) {
+	const lines = exports
+		.filter(([name]) => !new RegExp(`(^|\\n)export ${name}=`).test(existing))
+		.map(([name, value]) => `export ${name}=${JSON.stringify(value)}`);
+	if (lines.length > 0) {
 		const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-		fs.appendFileSync(envFile, `${prefix}${linesToAdd.join("\n")}\n`, "utf8");
+		fs.appendFileSync(envFile, `${prefix}${lines.join("\n")}\n`, "utf8");
 	}
 	return true;
+}
+
+const TRANSCRIPT_READ_BUDGET_BYTES = 32 * 1024 * 1024;
+
+function readRange(fd, start, end) {
+	const buffer = Buffer.alloc(end - start);
+	let filled = 0;
+	while (filled < buffer.length) {
+		const count = fs.readSync(fd, buffer, filled, buffer.length - filled, start + filled);
+		if (count === 0) break;
+		filled += count;
+	}
+	return buffer.subarray(0, filled);
+}
+
+function readCompleteLines(fd, start, size) {
+	let end = Math.min(size, start + TRANSCRIPT_READ_BUDGET_BYTES);
+	let buffer = readRange(fd, start, end);
+	while (buffer.lastIndexOf(0x0a) < 0 && end < size) {
+		const next = Math.min(size, end + TRANSCRIPT_READ_BUDGET_BYTES);
+		buffer = Buffer.concat([buffer, readRange(fd, end, next)]);
+		end = next;
+	}
+	return buffer.subarray(0, buffer.lastIndexOf(0x0a) + 1);
+}
+
+// Claude Code writes each subagent's transcript beside the session transcript. Both spend the same quota.
+function sessionTranscripts(transcriptPath) {
+	const subagentDir = path.join(path.dirname(transcriptPath), path.basename(transcriptPath, ".jsonl"), "subagents");
+	let names = [];
+	try {
+		names = fs.readdirSync(subagentDir).filter((name) => name.endsWith(".jsonl"));
+	} catch {}
+	return [transcriptPath, ...names.map((name) => path.join(subagentDir, name))];
+}
+
+function recordTranscriptUsage({ pluginDataDir, transcriptPath, sessionId, nowMs }) {
+	const cursorFile = path.join(
+		pluginDataDir,
+		"transcript-cursors",
+		`${crypto.createHash("sha256").update(transcriptPath).digest("hex").slice(0, 32)}.json`
+	);
+	let cursor = {};
+	try {
+		cursor = JSON.parse(fs.readFileSync(cursorFile, "utf8"));
+	} catch {}
+
+	let fd;
+	try {
+		fd = fs.openSync(transcriptPath, "r");
+	} catch (err) {
+		if (err?.code === "ENOENT") return;
+		throw err;
+	}
+	try {
+		const { size, ino } = fs.fstatSync(fd);
+		const start = cursor.ino === ino && Number.isInteger(cursor.offset) && cursor.offset <= size ? cursor.offset : 0;
+		const chunk = readCompleteLines(fd, start, size);
+		const seen = new Set();
+		for (const line of chunk.toString("utf8").split("\n")) {
+			if (!line.includes('"assistant"')) continue;
+			let entry;
+			try {
+				entry = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const message = entry?.message;
+			const usage = message?.usage;
+			if (entry?.type !== "assistant" || typeof message?.id !== "string" || !usage || seen.has(message.id)) continue;
+			seen.add(message.id);
+			if (entry.isApiErrorMessage === true && (entry.apiError === "usage_limit_reached" || entry.quotaLimits?.status === "rejected")) {
+				const hitAt = Date.parse(entry.timestamp);
+				appendUsageEvent({
+					pluginDataDir,
+					pid: "native",
+					event: {
+						eventId: `claude-native-limit-${message.id}`,
+						sessionId,
+						recordedAt: Number.isFinite(hitAt) ? hitAt : nowMs,
+						provider: "claude-native",
+						quotaPool: "claude-code-native",
+						modelSlug: "claude-host",
+						totalTokens: 0,
+						status: "QUOTA_EXHAUSTED",
+					},
+				});
+				continue;
+			}
+			if (message.model === "<synthetic>" || resolveModelAndEffort(message.model)) continue;
+			const recordedAt = Date.parse(entry.timestamp);
+			appendUsageEvent({
+				pluginDataDir,
+				pid: "native",
+				event: {
+					eventId: `claude-native-${message.id}`,
+					sessionId,
+					recordedAt: Number.isFinite(recordedAt) ? recordedAt : nowMs,
+					provider: "claude-native",
+					quotaPool: "claude-code-native",
+					modelSlug: message.model,
+					inputTokens: (Number(usage.input_tokens) || 0) + (Number(usage.cache_creation_input_tokens) || 0),
+					outputTokens: Number(usage.output_tokens) || 0,
+					cacheReadTokens: Number(usage.cache_read_input_tokens) || 0,
+					status: "SUCCESS",
+				},
+			});
+		}
+		writeJsonAtomic(cursorFile, { offset: start + chunk.length, ino });
+	} finally {
+		fs.closeSync(fd);
+	}
 }
 
 export function evaluateHookEvent({ hookStdinJson, env: rawEnv, nowMs = Date.now() }) {
@@ -632,7 +1324,7 @@ export function evaluateHookEvent({ hookStdinJson, env: rawEnv, nowMs = Date.now
 	if (eventName === "SessionStart") {
 		fs.mkdirSync(path.join(env.pluginDataDir, "ledger"), { recursive: true });
 		fs.mkdirSync(path.join(env.pluginDataDir, "worktrees"), { recursive: true });
-		persistPluginDataEnvVar(env.envFile, env.pluginDataDir);
+		persistPluginDataEnvVar(env.envFile, env.pluginDataDir, env.weeklyBudgets);
 
 		const compaction = compactExpiredLedgerShards({
 			pluginDataDir: env.pluginDataDir,
@@ -664,6 +1356,26 @@ export function evaluateHookEvent({ hookStdinJson, env: rawEnv, nowMs = Date.now
 				additionalContext: contextSummary,
 			},
 		});
+	}
+
+	if (eventName === "Stop") {
+		const transcript = parseAbsolutePath(payload.transcript_path);
+		if (transcript.kind === "error") {
+			return { continue: true };
+		}
+		try {
+			for (const transcriptPath of sessionTranscripts(transcript.value)) {
+				recordTranscriptUsage({
+					pluginDataDir: env.pluginDataDir,
+					transcriptPath,
+					sessionId: payload.session_id ?? env.sessionId,
+					nowMs,
+				});
+			}
+			return { continue: true };
+		} catch (err) {
+			return { continue: true, systemMessage: `[claugle] Could not record native Claude Code usage: ${errorMessage(err)}` };
+		}
 	}
 
 	if (eventName === "UserPromptSubmit") {

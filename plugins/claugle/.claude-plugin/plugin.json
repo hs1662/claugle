@@ -40,12 +40,6 @@
 			"description": "Rolling 7-day token budget for standalone Gemini CLI models (gemini-2.5-pro and gemini-2.5-flash).",
 			"type": "number",
 			"default": 10000000
-		},
-		"default_agy_mode": {
-			"title": "Default Agy Execution Mode",
-			"description": "Default execution mode for agy headless calls (plan, accept-edits, or auto).",
-			"type": "string",
-			"default": "accept-edits"
 		}
 	}
 }

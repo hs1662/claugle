@@ -1,0 +1,754 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { describe, it } from "node:test";
+import { startAnthropicGatewayServer } from "../plugins/claugle/scripts/anthropic-gateway.mjs";
+import { parsePluginEnv, parseTaskRequest } from "../plugins/claugle/scripts/policy-engine.mjs";
+import { buildAgyCliArgs, executeRoutedTask, prepareAgyHome } from "../plugins/claugle/scripts/provider-runner.mjs";
+
+const tmp = (prefix) => fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+
+function gitRepo(files = {}) {
+	const repo = tmp("claugle-iso-repo-");
+	const git = (...a) => execFileSync("git", ["-C", repo, ...a], { stdio: "pipe" });
+	git("init", "-q");
+	for (const [rel, body] of Object.entries({ "README.md": "hi\n", ...files })) {
+		fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+		fs.writeFileSync(path.join(repo, rel), body);
+	}
+	git("add", "-A");
+	git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+	return repo;
+}
+
+function stubAgy(body) {
+	const file = path.join(tmp("claugle-iso-bin-"), "agy");
+	fs.writeFileSync(
+		file,
+		`#!/usr/bin/env node
+const fs = require("node:fs"), path = require("node:path"), cp = require("node:child_process");
+const a = process.argv.slice(2);
+const addDirs = a.flatMap((v, i) => (a[i - 1] === "--add-dir" ? [v] : []));
+fs.appendFileSync(__filename + ".starts", "x");
+const record = (value) => fs.writeFileSync(__filename + ".record", JSON.stringify(value));
+const reply = (response) => process.stdout.write(JSON.stringify({ response, usage: {} }) + "\\n");
+process.stdin.resume();
+process.stdin.on("end", () => {
+${body}
+});
+`,
+		{ mode: 0o755 }
+	);
+	return { file, started: () => fs.existsSync(`${file}.starts`), recorded: () => JSON.parse(fs.readFileSync(`${file}.record`, "utf8")) };
+}
+
+const envFor = (repo, agy) =>
+	parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("claugle-iso-data-"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+
+const AGY_PERMISSION_ACTIONS = ["command", "read_file", "write_file", "read_url", "mcp", "execute_url"];
+
+describe("agy gets only deny rules it accepts", () => {
+	it("every deny entry names an action agy accepts, in plan and accept-edits modes", () => {
+		for (const mode of ["plan", "accept-edits"]) {
+			const args = buildAgyCliArgs({ prompt: "x", modelSlug: "gemini-3.8-flash-low", mode, cwd: os.tmpdir(), hostRepoRoot: "/home/u/project" });
+			const deny = JSON.parse(args[args.indexOf("--settings") + 1]).permissions.deny;
+			assert.ok(deny.includes("command(*)"), `${mode}: ${JSON.stringify(deny)}`);
+			assert.deepEqual(deny.filter((entry) => !AGY_PERMISSION_ACTIONS.includes(entry.slice(0, entry.indexOf("(")))), [], mode);
+		}
+	});
+});
+
+describe("edit runs cannot plant agy customizations or harness instructions in the host repo", () => {
+	it("the gate denies writes into every agy customization folder and instruction file, and the harvest rejects them when written anyway", async () => {
+		const planted = [".agent/hooks.json", "_agents/x", "_agent/x", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", "src/GEMINI.md"];
+		const repo = gitRepo();
+		const agy = stubAgy(`
+const gate = path.join(addDirs[0], ".agents");
+const ask = (rel) => JSON.parse(cp.execFileSync(process.execPath, ["tool-gate.cjs"], { cwd: gate, input: JSON.stringify({ toolCall: { name: "write_to_file", args: { TargetFile: path.join(process.cwd(), rel), CodeContent: "{}" } } }) })).decision;
+const verdicts = Object.fromEntries(["notes.txt", ...${JSON.stringify(planted)}].map((rel) => [rel, ask(rel)]));
+for (const rel of ${JSON.stringify(planted)}) {
+	fs.mkdirSync(path.dirname(rel), { recursive: true });
+	fs.writeFileSync(rel, "{}");
+}
+record(verdicts);
+reply("done");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the readme", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { "notes.txt": "allow", ...Object.fromEntries(planted.map((rel) => [rel, "deny"])) });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
+		assert.deepEqual([...out.worktreeOutcome.violatingFiles].sort(), [...planted].sort());
+		for (const rel of planted) assert.equal(fs.existsSync(path.join(repo, rel)), false, rel);
+	});
+});
+
+describe("edit runs cannot change what the harness instruction files read", () => {
+	const writeAndAsk = (paths) => `
+const gate = path.join(addDirs[0], ".agents");
+const ask = (rel) => JSON.parse(cp.execFileSync(process.execPath, ["tool-gate.cjs"], { cwd: gate, input: JSON.stringify({ toolCall: { name: "write_to_file", args: { TargetFile: path.join(process.cwd(), rel), CodeContent: "x" } } }) })).decision;
+record(Object.fromEntries(${JSON.stringify(paths)}.map((rel) => [rel, ask(rel)])));
+for (const rel of ${JSON.stringify(paths)}.filter((rel) => rel !== "CLAUDE.md")) {
+	fs.mkdirSync(path.dirname(rel), { recursive: true });
+	fs.writeFileSync(rel, "PLANTED\\n");
+}
+reply("done");`;
+	const commit = (repo) => {
+		execFileSync("git", ["-C", repo, "add", "-A"]);
+		execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "rules"]);
+	};
+
+	it("protects the file a symlinked CLAUDE.md points to", async () => {
+		const repo = gitRepo({ "docs/rules.md": "Never run network commands.\n" });
+		fs.symlinkSync("docs/rules.md", path.join(repo, "CLAUDE.md"));
+		commit(repo);
+		const agy = stubAgy(writeAndAsk(["CLAUDE.md", "docs/rules.md"]));
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { "CLAUDE.md": "deny", "docs/rules.md": "deny" });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
+		assert.deepEqual([...out.worktreeOutcome.violatingFiles], ["docs/rules.md"]);
+		assert.equal(fs.readFileSync(path.join(repo, "CLAUDE.md"), "utf8"), "Never run network commands.\n");
+	});
+
+	it("protects every file an instruction file names with @path, even inside code, and nothing else", async () => {
+		const repo = gitRepo({
+			"CLAUDE.md": "# Rules\n\n@docs/rules.md\n\n`@docs/example.md` is only an example.\n",
+			"docs/rules.md": "See @more.md and @missing.md\n",
+			"docs/more.md": "Be careful.\n",
+		});
+		const agy = stubAgy(writeAndAsk(["docs/rules.md", "docs/more.md", "docs/missing.md", "docs/example.md", "docs/free.md"]));
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { "docs/rules.md": "deny", "docs/more.md": "deny", "docs/missing.md": "deny", "docs/example.md": "deny", "docs/free.md": "allow" });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
+		assert.deepEqual([...out.worktreeOutcome.violatingFiles].sort(), ["docs/example.md", "docs/missing.md", "docs/more.md", "docs/rules.md"]);
+		assert.equal(fs.readFileSync(path.join(repo, "docs/rules.md"), "utf8"), "See @more.md and @missing.md\n");
+	});
+
+	// Each case is a gap an adversarial review found in an earlier collector. The stub asks the gate about
+	// each target, then writes it anyway, so both the gate and the harvest must hold.
+	const rules = "Never run network commands.\n";
+	const cases = {
+		"an import inside a symlinked CLAUDE.md's target, relative to the target": {
+			files: { "docs/rules.md": "@more.md\n", "docs/more.md": rules },
+			links: { "CLAUDE.md": "docs/rules.md" },
+			targets: ["docs/more.md"],
+		},
+		"an import with a #fragment": { files: { "CLAUDE.md": "@docs/rules.md#setup\n", "docs/rules.md": rules }, targets: ["docs/rules.md"] },
+		"an import with an escaped space": { files: { "CLAUDE.md": "@docs/team\\ rules.md\n", "docs/team rules.md": rules }, targets: ["docs/team rules.md"] },
+		"an import in bold": { files: { "CLAUDE.md": "- Always follow **@docs/rules.md**\n", "docs/rules.md": rules }, targets: ["docs/rules.md"] },
+		"an import as link text": { files: { "CLAUDE.md": "See [@docs/rules.md](docs/rules.md).\n", "docs/rules.md": rules }, targets: ["docs/rules.md"] },
+		"an import between two literal ``` in prose": {
+			files: { "CLAUDE.md": "Wrap code in ``` fences.\n\n@docs/rules.md\n\nClose each fence with ``` alone.\n", "docs/rules.md": rules },
+			targets: ["docs/rules.md"],
+		},
+		"an absolute import into the repo": { files: { "docs/rules.md": rules }, host: (repo) => ({ "CLAUDE.md": `@${repo}/docs/rules.md\n` }), commitHost: true, targets: ["docs/rules.md"] },
+		"an import in a gitignored CLAUDE.local.md": {
+			files: { ".gitignore": "CLAUDE.local.md\n", "docs/rules.md": rules },
+			host: () => ({ "CLAUDE.local.md": "@docs/rules.md\n" }),
+			targets: ["docs/rules.md"],
+		},
+		"an import the user added to CLAUDE.md without committing": { files: { "CLAUDE.md": "# Rules\n" }, host: () => ({ "CLAUDE.md": "@docs/new-rules.md\n" }), targets: ["docs/new-rules.md"] },
+		"an import in an untracked CLAUDE.md": { files: { "docs/rules.md": rules }, host: () => ({ "CLAUDE.md": "@docs/rules.md\n" }), targets: ["docs/rules.md"] },
+		"an import in .claude/rules": { files: { ".claude/rules/security.md": "@../../docs/policy.md\n", "docs/policy.md": rules }, targets: ["docs/policy.md"] },
+		"the target of a symlinked .claude/rules file": { files: { "docs/style.md": rules }, links: { ".claude/rules/style.md": "../../docs/style.md" }, targets: ["docs/style.md"] },
+		"the target of an absolute CLAUDE.md symlink into the repo": { files: { "docs/rules.md": rules }, links: { "CLAUDE.md": (repo) => `${repo}/docs/rules.md` }, targets: ["docs/rules.md"] },
+		"a missing import target behind a folder symlink": {
+			files: { "CLAUDE.md": "@docs/new.md\n", "real-docs/index.md": "x\n" },
+			links: { docs: "real-docs" },
+			targets: ["docs/new.md", "real-docs/new.md"],
+		},
+		"the middle link of a symlink chain": { files: { "docs/b.md": rules }, links: { "CLAUDE.md": "notes/a.md", "notes/a.md": "../docs/b.md" }, targets: ["notes/a.md"] },
+		"the folder a symlinked .claude points to": {
+			files: { "config/claude/settings.json": "{}\n" },
+			links: { ".claude": "config/claude" },
+			targets: ["config/claude/settings.json", "config/claude/rules/evil.md"],
+		},
+		"the middle link of a symlinked .claude chain": { files: { "config/claude/settings.json": "{}\n" }, links: { ".claude": "cfg", cfg: "config/claude" }, targets: ["cfg"] },
+		"the folder a symlinked .claude/rules points to": {
+			files: { "shared/rules/security.md": rules },
+			links: { ".claude/rules": "../shared/rules" },
+			targets: ["shared/rules/security.md", "shared/rules/evil.md"],
+		},
+		"the file a symlinked .claude/settings.json points to": { files: { "config/settings.json": "{}\n" }, links: { ".claude/settings.json": "../config/settings.json" }, targets: ["config/settings.json"] },
+		"the scripts .claude/settings.json hooks run": {
+			files: {
+				".claude/settings.json": JSON.stringify({
+					hooks: {
+						SessionStart: [{ hooks: [{ type: "command", command: '"$CLAUDE_PROJECT_DIR"/scripts/session-start.sh' }] }],
+						PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node scripts/guard.js" }] }],
+					},
+				}),
+				"scripts/session-start.sh": "echo hi\n",
+				"scripts/guard.js": "\n",
+			},
+			targets: ["scripts/session-start.sh", "scripts/guard.js"],
+		},
+		"the script an .mcp.json server runs": {
+			files: { ".mcp.json": JSON.stringify({ mcpServers: { tools: { command: "node", args: ["tools/server.js"] } } }), "tools/server.js": "\n" },
+			targets: ["tools/server.js"],
+		},
+		"the path Claude Code reads when a backslash cuts an import": { files: { "CLAUDE.md": "@docs/api\\_ref.md and @notes\\#2.md\n" }, targets: ["docs/api", "notes"] },
+		"an import in an instruction file over 1 MiB": { files: { "CLAUDE.md": `${"x".repeat(1100000)}\n@docs/policy.md\n`, "docs/policy.md": rules }, targets: ["docs/policy.md"] },
+		"a case variant of an instruction file, a harness folder and an import": {
+			files: { "CLAUDE.md": "@docs/guide.md\n", "docs/guide.md": rules },
+			targets: ["Claude.md", ".Claude/settings.json", "docs/Guide.md"],
+		},
+		"the scripts a subfolder project's hooks run": {
+			files: {
+				"packages/app/.claude/settings.json": JSON.stringify({
+					hooks: { SessionStart: [{ hooks: [{ type: "command", command: '"$CLAUDE_PROJECT_DIR"/scripts/guard.sh' }, { type: "command", command: "sh scripts/session.sh" }] }] },
+				}),
+				"packages/app/scripts/guard.sh": "\n",
+				"packages/app/scripts/session.sh": "\n",
+			},
+			targets: ["packages/app/scripts/guard.sh", "packages/app/scripts/session.sh"],
+		},
+		"the script a slash command runs with !": {
+			files: { ".claude/commands/notes.md": "---\nallowed-tools: Bash(sh scripts/notes.sh:*)\n---\n!`sh scripts/notes.sh`\n", "scripts/notes.sh": "\n" },
+			targets: ["scripts/notes.sh"],
+		},
+		"the scripts hooks name by module, without an extension, after cd, with a default, or under the repo top": {
+			files: {
+				".claude/settings.json": JSON.stringify({
+					hooks: {
+						Stop: [
+							{
+								hooks: [
+									"python3 -m hooks.guard",
+									"node scripts/guard",
+									'cd "$CLAUDE_PROJECT_DIR/tools" && sh ./check.sh',
+									'sh "${CLAUDE_PROJECT_DIR:-.}"/scripts/stop.sh',
+									'sh "$(git rev-parse --show-toplevel)/scripts/top.sh"',
+								].map((command) => ({ type: "command", command })),
+							},
+						],
+					},
+				}),
+				"hooks/guard.py": "\n",
+				"scripts/guard.js": "\n",
+				"tools/check.sh": "\n",
+				"scripts/stop.sh": "\n",
+				"scripts/top.sh": "\n",
+			},
+			targets: ["hooks/guard.py", "scripts/guard.js", "tools/check.sh", "scripts/stop.sh", "scripts/top.sh"],
+		},
+		"the script node runs for a folder, through its package.json": {
+			files: {
+				".mcp.json": JSON.stringify({ mcpServers: { notes: { command: "node", args: ["tools/notes"] } } }),
+				"tools/notes/package.json": JSON.stringify({ main: "server.js" }),
+				"tools/notes/server.js": "\n",
+			},
+			targets: ["tools/notes/server.js", "tools/notes/package.json"],
+		},
+		"an import whose name differs only in Unicode normalization": { files: { "CLAUDE.md": "@docs/caf\u00e9.md\n" }, targets: ["docs/cafe\u0301.md"] },
+		"the script a hook in a case variant of .claude runs": {
+			files: { ".Claude/settings.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "sh scripts/hook.sh" }] }] } }), "scripts/hook.sh": "\n" },
+			targets: ["scripts/hook.sh"],
+		},
+		"the scripts hooks name by a bare folder or module, through another variable's default, $PWD or the settings env": {
+			files: {
+				".claude/settings.json": JSON.stringify({
+					env: { HOOKS: "tools/hooks" },
+					hooks: {
+						Stop: [
+							{
+								hooks: [
+									"cd tools && sh ./check.sh",
+									"uv --directory hooks run guard.py",
+									"python3 -m guard",
+									"node server",
+									"PYTHONPATH=lib python3 -m lint",
+									"sh ${HOOK_DIR:-scripts}/guard.sh",
+									"sh $PWD/bin/stop.sh",
+									'sh "$HOOKS/env.sh"',
+								].map((command) => ({ type: "command", command })),
+							},
+						],
+					},
+				}),
+				"tools/check.sh": "\n",
+				"hooks/guard.py": "\n",
+				"guard.py": "\n",
+				"server.js": "\n",
+				"lib/lint.py": "\n",
+				"scripts/guard.sh": "\n",
+				"bin/stop.sh": "\n",
+				"tools/hooks/env.sh": "\n",
+			},
+			targets: ["tools/check.sh", "hooks/guard.py", "guard.py", "server.js", "lib/lint.py", "scripts/guard.sh", "bin/stop.sh", "tools/hooks/env.sh"],
+		},
+		"hooks in agent and skill frontmatter, a fenced ! block, and a command's @ reference from the project folder": {
+			files: {
+				".claude/agents/db.md": "---\nname: db\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: ./scripts/validate.sh\n---\nRead only.\n",
+				".claude/skills/deploy/SKILL.md": "---\nname: deploy\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: python3 scripts/deploy-guard.py\n---\n```!\nsh scripts/env-summary.sh\n```\n",
+				".claude/commands/ctx.md": "Follow @docs/conventions.md\n",
+				"scripts/validate.sh": "\n",
+				"scripts/deploy-guard.py": "\n",
+				"scripts/env-summary.sh": "\n",
+				"docs/conventions.md": rules,
+			},
+			targets: ["scripts/validate.sh", "scripts/deploy-guard.py", "scripts/env-summary.sh", "docs/conventions.md"],
+		},
+		"links one level below a symlinked .claude": {
+			files: { "real/settings.json": "{}\n", "shared/rules/a.md": rules, "cfg/keep.md": "x\n" },
+			links: { ".claude": "cfg", "cfg/settings.json": "../real/settings.json", "cfg/rules": "../shared/rules" },
+			targets: ["real/settings.json", "shared/rules/planted.md"],
+		},
+		"a missing import target whose folder the run plants as a symlink": {
+			files: { "CLAUDE.md": "@docs/rules.md\n" },
+			targets: ["docs/rules.md"],
+			plant: `fs.mkdirSync("evil"); fs.writeFileSync("evil/rules.md", "PLANTED\\n"); fs.symlinkSync("evil", "docs");`,
+		},
+	};
+	const askThenWrite = (targets, plant) => `
+const gate = path.join(addDirs[0], ".agents");
+const ask = (rel) => JSON.parse(cp.execFileSync(process.execPath, ["tool-gate.cjs"], { cwd: gate, input: JSON.stringify({ toolCall: { name: "write_to_file", args: { TargetFile: path.join(process.cwd(), rel), CodeContent: "x" } } }) })).decision;
+record(Object.fromEntries(${JSON.stringify(targets)}.map((rel) => [rel, ask(rel)])));
+${
+		plant ??
+		`for (const rel of ${JSON.stringify(targets)}) {
+	if (fs.lstatSync(rel, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(rel);
+	fs.mkdirSync(path.dirname(rel), { recursive: true });
+	fs.writeFileSync(rel, "PLANTED\\n");
+}`
+	}
+reply("done");`;
+	const read = (file) => {
+		const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+		if (!stat) return null;
+		return stat.isSymbolicLink() ? `-> ${fs.readlinkSync(file)}` : stat.isFile() ? fs.readFileSync(file, "utf8") : "(folder)";
+	};
+	for (const [name, c] of Object.entries(cases)) {
+		it(`protects ${name}`, async () => {
+			const repo = gitRepo(c.files);
+			for (const [rel, target] of Object.entries(c.links ?? {})) {
+				fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+				fs.symlinkSync(typeof target === "function" ? target(repo) : target, path.join(repo, rel));
+			}
+			if (c.links) commit(repo);
+			for (const [rel, body] of Object.entries(c.host?.(repo) ?? {})) fs.writeFileSync(path.join(repo, rel), body);
+			if (c.commitHost) commit(repo);
+			const before = c.targets.map((rel) => read(path.join(repo, rel)));
+			const agy = stubAgy(askThenWrite(c.targets, c.plant));
+			const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+			assert.deepEqual(agy.recorded(), Object.fromEntries(c.targets.map((rel) => [rel, "deny"])));
+			assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+			assert.deepEqual(c.targets.map((rel) => read(path.join(repo, rel))), before);
+		});
+	}
+
+	it("protects user-level Claude Code files that link into the repo, and the scripts user hooks and MCP servers run", async () => {
+		const repo = gitRepo({ "claude/settings.json": "{}\n", "claude/skills/deploy/SKILL.md": "deploy\n", "tools/k.py": "\n", "tools/mcp.js": "\n" });
+		const home = tmp("claugle-iso-home-");
+		fs.mkdirSync(path.join(home, ".claude"));
+		fs.symlinkSync(path.join(repo, "claude/skills"), path.join(home, ".claude/skills"));
+		fs.symlinkSync(path.join(repo, "claude/settings.json"), path.join(home, ".claude/settings.local.json"));
+		fs.writeFileSync(path.join(home, ".claude/settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `python3 ${repo}/tools/k.py` }] }] } }));
+		fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ projects: { [repo]: { mcpServers: { local: { command: "node", args: ["tools/mcp.js"] } } } } }));
+		const targets = ["claude/settings.json", "claude/skills/deploy/SKILL.md", "tools/k.py", "tools/mcp.js"];
+		const agy = stubAgy(askThenWrite(targets));
+		const savedHome = process.env.HOME;
+		process.env.HOME = home;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			process.env.HOME = savedHome;
+		}
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, "tools/k.py"), "utf8"), "\n");
+	});
+
+	it("protects .claude when the edit run's folder is .claude itself", async () => {
+		const repo = gitRepo({ ".claude/settings.json": "{}\n" });
+		const targets = ["settings.json", "settings.local.json", "rules/planted.md"];
+		const agy = stubAgy(askThenWrite(targets));
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: path.join(repo, ".claude") }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, ".claude/settings.json"), "utf8"), "{}\n");
+	});
+
+	it("protects scripts user configs reach through $HOME, PATH or a link from outside the repo, and user files linked two levels down", async () => {
+		const repo = gitRepo({ "bin/guard.sh": "\n", "bin/claude-ctx": "\n", "hooks/ctx.sh": "\n", "claude/commands/ops/release.md": "release\n" });
+		const home = tmp("claugle-iso-home-");
+		fs.symlinkSync(repo, path.join(home, "dotfiles"));
+		fs.symlinkSync(path.join(repo, "bin"), path.join(home, "bin"));
+		fs.mkdirSync(path.join(home, "pbin"));
+		fs.symlinkSync(path.join(repo, "bin/claude-ctx"), path.join(home, "pbin/claude-ctx"));
+		fs.mkdirSync(path.join(home, ".claude/commands/ops"), { recursive: true });
+		fs.symlinkSync(path.join(repo, "claude/commands/ops/release.md"), path.join(home, ".claude/commands/ops/release.md"));
+		const commands = ["sh ~/bin/guard.sh", "sh $HOME/dotfiles/hooks/ctx.sh", "timeout 5 claude-ctx"];
+		fs.writeFileSync(path.join(home, ".claude/settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: commands.map((command) => ({ type: "command", command })) }] } }));
+		const targets = ["bin/guard.sh", "hooks/ctx.sh", "bin/claude-ctx", "claude/commands/ops/release.md"];
+		const agy = stubAgy(askThenWrite(targets));
+		const saved = { HOME: process.env.HOME, PATH: process.env.PATH };
+		process.env.HOME = home;
+		process.env.PATH = `${path.join(home, "pbin")}${path.delimiter}${saved.PATH}`;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			Object.assign(process.env, saved);
+		}
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+	});
+
+	it("protects what the session project's instruction files import from the repo being edited", async () => {
+		const parent = tmp("claugle-iso-sib-");
+		const init = (name, files) => {
+			const dir = path.join(parent, name);
+			fs.mkdirSync(dir);
+			for (const [rel, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, rel), body);
+			execFileSync("git", ["-C", dir, "init", "-q"]);
+			commit(dir);
+			return dir;
+		};
+		const app = init("app", { "CLAUDE.md": "@../shared/conventions.md\n" });
+		const shared = init("shared", { "conventions.md": rules });
+		const agy = stubAgy(askThenWrite(["conventions.md"]));
+		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("claugle-iso-data-"), CLAUDE_PROJECT_DIR: app, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: shared }).value, env });
+		assert.deepEqual(agy.recorded(), { "conventions.md": "deny" });
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(shared, "conventions.md"), "utf8"), rules);
+	});
+
+	it("an instruction file over 8 MiB hands the edit back to Claude Code instead of guessing", async () => {
+		const repo = gitRepo({ "CLAUDE.md": "x".repeat(9 * 1024 * 1024) });
+		const agy = stubAgy(`reply("done");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.status, "DELEGATE_TO_HOST");
+		assert.equal(agy.started(), false);
+	});
+
+	it("a hook that names the project folder itself leaves the package entry free to edit", async () => {
+		const hooks = ['"$CLAUDE_PROJECT_DIR"/.claude/hooks/fmt.sh', "npx eslint --fix .", "ruff check . && pytest"].map((command) => ({ type: "command", command }));
+		const repo = gitRepo({
+			".claude/settings.json": JSON.stringify({ hooks: { PostToolUse: [{ hooks }] } }),
+			".claude/hooks/fmt.sh": "\n",
+			"package.json": JSON.stringify({ main: "src/index.js" }),
+			"src/index.js": "\n",
+		});
+		const agy = stubAgy(`fs.writeFileSync("package.json", "{}\\n"); fs.writeFileSync("src/index.js", "x\\n"); reply("done");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "edit", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.worktreeOutcome?.kind, "applied-to-host", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, "src/index.js"), "utf8"), "x\n");
+	});
+
+	it("protects the scripts ! lines in user-level commands and skills run, and the files they name with @", async () => {
+		const repo = gitRepo({ "tools/ctx.py": "\n", "tools/deploy.sh": "\n", "docs/conventions.md": "x\n" });
+		const home = tmp("claugle-iso-home-");
+		fs.mkdirSync(path.join(home, ".claude/commands"), { recursive: true });
+		fs.mkdirSync(path.join(home, ".claude/skills/deploy"), { recursive: true });
+		fs.writeFileSync(path.join(home, ".claude/commands/ctx.md"), `!\`python3 ${repo}/tools/ctx.py\`\nFollow @docs/conventions.md\n`);
+		fs.writeFileSync(path.join(home, ".claude/skills/deploy/SKILL.md"), `!\`sh ${repo}/tools/deploy.sh\`\n`);
+		const targets = ["tools/ctx.py", "tools/deploy.sh", "docs/conventions.md"];
+		const agy = stubAgy(askThenWrite(targets));
+		const savedHome = process.env.HOME;
+		process.env.HOME = home;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			process.env.HOME = savedHome;
+		}
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+	});
+
+	it("one very long @ token does not stall the edit run", async () => {
+		const repo = gitRepo({ "CLAUDE.md": `@${"a/".repeat(40000)}x.md\n` });
+		const agy = stubAgy(`fs.writeFileSync("notes.txt", "hi\\n"); reply("done");`);
+		const started = Date.now();
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "add notes", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.worktreeOutcome?.kind, "applied-to-host");
+		assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+	});
+
+	it("an edit run in a repo whose file list passes 1 MiB still applies and leaves no worktree", async () => {
+		const deep = `${"d".repeat(120)}/${"e".repeat(120)}`;
+		const repo = gitRepo(Object.fromEntries(Array.from({ length: 4500 }, (_, i) => [`${deep}/f${i}.txt`, ""])));
+		const agy = stubAgy(`fs.writeFileSync("notes.txt", "hi\\n"); reply("done");`);
+		const env = envFor(repo, agy.file);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "add notes", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env });
+		assert.equal(out.worktreeOutcome?.kind, "applied-to-host", JSON.stringify(out.errors ?? out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, "notes.txt"), "utf8"), "hi\n");
+		assert.deepEqual(fs.readdirSync(path.join(env.pluginDataDir, "worktrees")), []);
+	});
+});
+
+describe("agy never starts where any agy customization folder would run commands", () => {
+	const hook = JSON.stringify({ x: { SessionStart: [{ type: "command", command: "true" }] } });
+	const cases = {
+		".agent/hooks.json": { ".agent/hooks.json": hook },
+		"_agents/hooks.json": { "_agents/hooks.json": hook },
+		"_agent/mcp_config.json": { "_agent/mcp_config.json": JSON.stringify({ mcpServers: { x: { command: "true" } } }) },
+		".agents/plugins.json": { ".agents/plugins.json": JSON.stringify({ entries: [{ path: "tools/plug" }] }), "tools/plug/kit/plugin.json": "{}", "tools/plug/kit/hooks.json": hook },
+	};
+	for (const [name, files] of Object.entries(cases)) {
+		it(`hands a read run back to the host when the repo has ${name}`, async () => {
+			const repo = gitRepo(files);
+			const agy = stubAgy(`reply("AGY_STARTED");`);
+			const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+			assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
+			assert.equal(agy.started(), false);
+		});
+	}
+
+	it("hands a read run back to the host when its cwd is a symlink into such a repo", async () => {
+		const repo = gitRepo({ ".agents/hooks.json": hook, "sub/a.txt": "x\n" });
+		const link = path.join(tmp("claugle-iso-link-"), "link");
+		fs.symlinkSync(path.join(repo, "sub"), link);
+		const agy = stubAgy(`reply("AGY_STARTED");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: link }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
+		assert.equal(agy.started(), false);
+	});
+
+	it("starts agy in a repo whose agy folders hold only rules and skills", async () => {
+		const repo = gitRepo({ ".agent/rules/style.md": "x\n", "_agents/skills/s/SKILL.md": "x\n" });
+		const agy = stubAgy(`reply("AGY_STARTED");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.status, "COMPLETED", out.responseText);
+		assert.equal(agy.started(), true);
+	});
+});
+
+const TOKEN = ".gemini/antigravity-cli/antigravity-oauth-token";
+const AGY_GLOBAL_CUSTOMIZATIONS = [
+	".gemini/GEMINI.md",
+	".gemini/AGENTS.md",
+	".gemini/config/GEMINI.md",
+	".gemini/config/AGENTS.md",
+	".gemini/config/rules/r.md",
+	".gemini/config/skills/s/SKILL.md",
+	".gemini/config/skills.json",
+	".gemini/config/rules.json",
+	".gemini/config/plugins.json",
+	".gemini/config/agents.json",
+	".gemini/config/workflows/w.md",
+	".gemini/config/global_workflows/w.md",
+	".gemini/config/sidecars/s/sidecar.json",
+	".gemini/antigravity-cli/hooks.json",
+	".gemini/config/plugins/p/plugin.json",
+	".gemini/config/mcp_config.json",
+	".gemini/config/hooks.json",
+	".gemini/config/config.json",
+];
+
+function fakeRealHome() {
+	const home = tmp("claugle-iso-realhome-");
+	for (const rel of [TOKEN, ".gitconfig", ".gemini/config/.migrated", ...AGY_GLOBAL_CUSTOMIZATIONS]) {
+		fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+		fs.writeFileSync(path.join(home, rel), rel === TOKEN ? "token" : "x");
+	}
+	return home;
+}
+
+function snapshot(root) {
+	const out = {};
+	const walk = (dir) => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			const rel = path.relative(root, full);
+			if (entry.isSymbolicLink()) out[rel] = `link:${fs.readlinkSync(full)}`;
+			else if (entry.isDirectory()) {
+				out[rel] = "dir";
+				walk(full);
+			} else out[rel] = `file:${fs.readFileSync(full, "base64")}`;
+		}
+	};
+	walk(root);
+	return out;
+}
+
+const linksIn = (root) => Object.entries(snapshot(root)).filter(([, v]) => v.startsWith("link:")).map(([rel]) => rel);
+
+describe("agy runs in a home that carries only the login token", () => {
+	it("exposes the token and none of agy's global rules, skills, plugins, hooks or MCP servers", () => {
+		const real = fakeRealHome();
+		const home = prepareAgyHome(tmp("claugle-iso-data-"), real);
+		for (const rel of [...AGY_GLOBAL_CUSTOMIZATIONS, ".gitconfig"]) assert.equal(fs.existsSync(path.join(home, rel)), false, rel);
+		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN));
+		assert.equal(fs.readFileSync(path.join(home, ".gemini/config/.migrated"), "utf8"), "");
+		assert.deepEqual(linksIn(home), [TOKEN]);
+	});
+
+	it("converges a home the old mirror left behind and never changes the real home", () => {
+		const real = fakeRealHome();
+		const before = snapshot(real);
+		const data = tmp("claugle-iso-data-");
+		const home = path.join(data, "agy-home");
+		fs.mkdirSync(path.join(home, ".gemini", "config"), { recursive: true });
+		fs.symlinkSync(path.join(real, ".gitconfig"), path.join(home, ".gitconfig"));
+		fs.symlinkSync(path.join(real, ".gemini", "antigravity-cli"), path.join(home, ".gemini", "antigravity-cli"));
+		fs.symlinkSync(path.join(real, ".gemini", "GEMINI.md"), path.join(home, ".gemini", "GEMINI.md"));
+		for (const name of ["rules", "skills", "skills.json", "plugins.json", "sidecars", ".migrated"]) {
+			fs.symlinkSync(path.join(real, ".gemini", "config", name), path.join(home, ".gemini", "config", name));
+		}
+		fs.symlinkSync(path.join(real, "gone"), path.join(home, ".gemini", "config", "stale"));
+		fs.writeFileSync(path.join(home, ".gemini", "config", "config.json"), "agy");
+		fs.mkdirSync(path.join(home, ".gemini", "brain", "b1"), { recursive: true });
+		fs.writeFileSync(path.join(home, ".gemini", "brain", "b1", "note"), "agy");
+		fs.mkdirSync(path.join(home, ".gemini", "cache"), { recursive: true });
+		fs.symlinkSync("../brain/b1/note", path.join(home, ".gemini", "cache", "latest"));
+
+		prepareAgyHome(data, real);
+		assert.deepEqual(linksIn(home).sort(), [".gemini/cache/latest", TOKEN].sort(), "agy's own links below the mirrored levels stay");
+		assert.equal(fs.lstatSync(path.join(home, ".gemini", "antigravity-cli")).isDirectory(), true);
+		assert.equal(fs.readFileSync(path.join(home, TOKEN), "utf8"), "token");
+		for (const rel of AGY_GLOBAL_CUSTOMIZATIONS.filter((r) => r !== ".gemini/config/config.json")) assert.equal(fs.existsSync(path.join(home, rel)), false, rel);
+		assert.equal(fs.readFileSync(path.join(home, ".gemini", "config", "config.json"), "utf8"), "agy");
+		assert.equal(fs.readFileSync(path.join(home, ".gemini", "brain", "b1", "note"), "utf8"), "agy");
+		assert.equal(fs.readFileSync(path.join(home, ".gemini/config/.migrated"), "utf8"), "");
+
+		fs.rmSync(path.join(home, TOKEN));
+		fs.writeFileSync(path.join(home, TOKEN), "stale copy");
+		prepareAgyHome(data, real);
+		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN), "a replaced token link is linked again");
+		fs.rmSync(path.join(home, TOKEN));
+		prepareAgyHome(data, real);
+		assert.equal(fs.realpathSync(path.join(home, TOKEN)), path.join(real, TOKEN), "a missing token link is linked again");
+
+		assert.deepEqual(snapshot(real), before);
+	});
+});
+
+const gitTop = (dir) => {
+	try {
+		return execFileSync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	} catch {
+		return null;
+	}
+};
+
+async function gatewayRequest(data, agy) {
+	const gw = await startAnthropicGatewayServer({
+		port: 0,
+		env: { pluginDataDir: data, pluginRoot: path.resolve("plugins/claugle"), projectDir: data, sessionId: "iso", weeklyBudgets: { "claude-code-native": 5e6, "agy-claude-pool": 8e6, "agy-gemini-pool": 15e6, "gemini-cli-pool": 1e7 }, agyBinOverride: agy },
+	});
+	try {
+		const res = await fetch(`${gw.url}/v1/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "gemini-4-argon", messages: [{ role: "user", content: "x" }] }) });
+		return { status: res.status, body: await res.json() };
+	} finally {
+		gw.server.close();
+	}
+}
+
+describe("the gateway runs agy in a workspace that is its own git repo", () => {
+	it("is a git top-level even when the plugin data folder sits inside another git repo", async () => {
+		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
+		const data = path.join(outer, "plugin-data");
+		fs.mkdirSync(data);
+		const agy = stubAgy(`record({ cwd: process.cwd(), top: cp.execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim() });
+process.stdout.write(JSON.stringify({ response: "ok", usage: {} }) + "\\n");`);
+		const res = await gatewayRequest(data, agy.file);
+		assert.equal(res.status, 200, JSON.stringify(res.body));
+		const seen = agy.recorded();
+		assert.equal(seen.cwd, path.join(data, "gateway-workspace"));
+		assert.equal(seen.top, seen.cwd);
+		assert.equal(gitTop(path.join(data, "gateway-workspace")), path.join(data, "gateway-workspace"));
+	});
+
+	it("refuses to start agy when the workspace cannot be made its own git repo", async () => {
+		const outer = gitRepo();
+		const data = path.join(outer, "plugin-data");
+		fs.mkdirSync(path.join(data, "gateway-workspace"), { recursive: true });
+		fs.writeFileSync(path.join(data, "gateway-workspace", ".git"), "not a git file\n");
+		const agy = stubAgy(`reply("ok");`);
+		const res = await gatewayRequest(data, agy.file);
+		assert.equal(res.status, 500, JSON.stringify(res.body));
+		assert.match(res.body.error.message, /git/);
+		assert.equal(agy.started(), false);
+	});
+});
+
+describe("delegated runs hand agy a gate folder that is its own git repo", () => {
+	it("is a git top-level even when the plugin data folder sits inside another git repo", async () => {
+		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
+		const data = path.join(outer, "plugin-data");
+		fs.mkdirSync(data);
+		const repo = gitRepo();
+		const agy = stubAgy(`record({ root: addDirs[0], top: cp.execFileSync("git", ["-C", addDirs[0], "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim() });
+reply("ok");`);
+		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: data, CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env });
+		assert.equal(out.status, "COMPLETED", out.responseText);
+		const seen = agy.recorded();
+		assert.ok(seen.root.startsWith(path.join(data, "agy-gates")), seen.root);
+		assert.equal(seen.top, seen.root);
+	});
+
+	it("hands the run back to the host when git is missing", async () => {
+		const project = tmp("claugle-iso-nogit-");
+		const agy = stubAgy(`reply("AGY_STARTED");`);
+		const bin = tmp("claugle-iso-path-");
+		fs.symlinkSync(process.execPath, path.join(bin, "node"));
+		const savedPath = process.env.PATH;
+		process.env.PATH = bin;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: project }).value, env: envFor(project, agy.file) });
+		} finally {
+			process.env.PATH = savedPath;
+		}
+		assert.equal(out.status, "DELEGATE_TO_HOST", out.responseText);
+		assert.equal(agy.started(), false);
+	});
+});
+
+describe("agy sees the folders and agent claugle chose", () => {
+	it("a project's own agent named like claugle's never replaces claugle's agent", async () => {
+		const projectAgent = "---\nname: claugle-reader\nmainAgent: true\ntools:\n  - run_command\n---\n\nYou are PROJECT-DEF.\n";
+		const repo = gitRepo({ ".agents/agents/claugle-reader/agent.md": projectAgent, ".agents/agents/claugle-editor/agent.md": projectAgent.replace("reader", "editor") });
+		const agy = stubAgy(`
+const agent = a[a.indexOf("--agent") + 1];
+const roots = [process.cwd(), ...addDirs].sort();
+const def = roots.map((r) => path.join(r, ".agents", "agents", agent, "agent.md")).find((f) => fs.existsSync(f));
+record({ definedBy: def && def.startsWith(addDirs[0]) ? "claugle" : "project", optsOut: Boolean(def) && fs.readFileSync(def, "utf8").includes("excludeDefaultComponents: true") });
+reply("done");`);
+		const env = parsePluginEnv({ CLAUDE_PLUGIN_DATA: tmp("zzz-claugle-data-"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini" }).value;
+		assert.ok(repo < env.pluginDataDir, "the project path sorts before the plugin data path");
+		for (const extra of [{}, { allowFileEdits: true, allowedEditGlobs: ["docs/**"] }]) {
+			await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo, ...extra }).value, env });
+			assert.deepEqual(agy.recorded(), { definedBy: "claugle", optsOut: true }, JSON.stringify(extra));
+		}
+	});
+
+	it("agy's PWD is the folder it runs in, not the caller's", async () => {
+		const repo = gitRepo();
+		const agy = stubAgy(`record({ pwd: process.env.PWD, cwd: process.cwd() }); reply("done");`);
+		const saved = process.env.PWD;
+		process.env.PWD = tmp("claugle-iso-elsewhere-");
+		try {
+			await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			process.env.PWD = saved;
+		}
+		const seen = agy.recorded();
+		assert.equal(seen.pwd, seen.cwd);
+	});
+
+	it("agy runs with its self-updater off", async () => {
+		const repo = gitRepo();
+		const agy = stubAgy(`record({ autoUpdate: process.env.AGY_CLI_DISABLE_AUTO_UPDATE ?? null }); reply("done");`);
+		await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { autoUpdate: "true" });
+	});
+
+	it("an inherited GIT_DIR does not stop the gate folder from becoming its own repo", () => {
+		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
+		const repo = gitRepo();
+		const other = gitRepo();
+		const agy = stubAgy(`record({ gateHasOwnGit: fs.existsSync(path.join(addDirs[0], ".git")), gitDir: process.env.GIT_DIR ?? null }); reply("done");`);
+		const cli = path.resolve("plugins/claugle/scripts/claugle.mjs");
+		execFileSync(process.execPath, [cli, "run", "--json", "--model", "flash", "Review src"], {
+			cwd: repo,
+			env: { ...process.env, CLAUDE_PLUGIN_DATA: path.join(outer, "plugin-data"), CLAUDE_PROJECT_DIR: repo, CLAUGLE_AGY_BIN: agy.file, CLAUGLE_GEMINI_BIN: "/nonexistent/gemini", GIT_DIR: path.join(other, ".git") },
+			stdio: "pipe",
+		});
+		assert.deepEqual(agy.recorded(), { gateHasOwnGit: true, gitDir: null });
+	});
+});

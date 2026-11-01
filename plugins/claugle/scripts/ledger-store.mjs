@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -101,12 +102,45 @@ export function appendUsageEvent(arg1, arg2, arg3 = {}) {
 
 	const shardFilename = `shard-${sanitizeShardSegment(event.sessionId)}-${sanitizeShardSegment(pid)}.jsonl`;
 	const shardPath = path.join(ledgerDir, shardFilename);
-	fs.appendFileSync(shardPath, `${JSON.stringify(event)}\n`, "utf8");
+	appendToShard(shardPath, `${JSON.stringify(event)}\n`);
 
 	return Object.freeze({
 		shardPath,
 		event,
 	});
+}
+
+const MAX_APPEND_ATTEMPTS = 5;
+
+function appendToShard(shardPath, text) {
+	for (let attempt = 1; attempt <= MAX_APPEND_ATTEMPTS; attempt += 1) {
+		const fd = fs.openSync(shardPath, "a");
+		let landed;
+		try {
+			fs.writeSync(fd, text);
+			const written = fs.fstatSync(fd);
+			const current = fs.statSync(shardPath, { throwIfNoEntry: false });
+			landed = current?.ino === written.ino && current?.dev === written.dev;
+		} finally {
+			fs.closeSync(fd);
+		}
+		if (landed) return;
+	}
+}
+
+function removeExpiredShard(shardPath, cutoffMs) {
+	const tombstone = `${shardPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.expired`;
+	try {
+		fs.renameSync(shardPath, tombstone);
+	} catch {
+		return false;
+	}
+	const live = readShardEvents(tombstone).filter((ev) => ev.recordedAt >= cutoffMs);
+	if (live.length > 0) {
+		appendToShard(shardPath, live.map((ev) => `${JSON.stringify(ev)}\n`).join(""));
+	}
+	fs.rmSync(tombstone, { force: true });
+	return live.length === 0;
 }
 
 function readShardEvents(shardPath) {
@@ -141,6 +175,35 @@ const DEFAULT_WEEKLY_BUDGETS = Object.freeze({
 	"gemini-cli-pool": 10_000_000,
 });
 
+function governorStatePath(pluginDataDir) {
+	return path.join(pluginDataDir, "governor-state.json");
+}
+
+function readPersistedQuotaState(pluginDataDir) {
+	try {
+		const { quotaState } = JSON.parse(fs.readFileSync(governorStatePath(pluginDataDir), "utf8"));
+		return ALL_QUOTA_STATES.includes(quotaState) ? quotaState : null;
+	} catch {
+		return null;
+	}
+}
+
+function persistQuotaState(pluginDataDir, quotaState, nowMs) {
+	const target = governorStatePath(pluginDataDir);
+	const tmpPath = `${target}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+	try {
+		fs.mkdirSync(pluginDataDir, { recursive: true });
+		fs.writeFileSync(tmpPath, `${JSON.stringify({ quotaState, updatedAt: nowMs })}\n`, "utf8");
+		try {
+			fs.renameSync(tmpPath, target);
+		} finally {
+			fs.rmSync(tmpPath, { force: true });
+		}
+	} catch (err) {
+		process.emitWarning(`claugle could not save the quota state to ${target}: ${err.message}`);
+	}
+}
+
 export function loadRollingQuotaSnapshot(arg1, arg2 = {}) {
 	const isObjectCall =
 		arg1 && typeof arg1 === "object" && "pluginDataDir" in arg1;
@@ -153,9 +216,10 @@ export function loadRollingQuotaSnapshot(arg1, arg2 = {}) {
 		...DEFAULT_WEEKLY_BUDGETS,
 		...(opts.weeklyBudgets ?? {}),
 	};
+	const persistedState = readPersistedQuotaState(pluginDataDir);
 	const previousState = ALL_QUOTA_STATES.includes(opts.previousState)
 		? opts.previousState
-		: "NORMAL";
+		: persistedState ?? "NORMAL";
 
 	const windowStart = Math.max(0, nowMs - thresholds.windowDurationMs);
 	const windowEnd = nowMs;
@@ -238,6 +302,9 @@ export function loadRollingQuotaSnapshot(arg1, arg2 = {}) {
 	});
 
 	const quotaState = transitionQuotaState(previousState, metrics, thresholds);
+	if (quotaState !== persistedState) {
+		persistQuotaState(pluginDataDir, quotaState, nowMs);
+	}
 
 	return Object.freeze({
 		quotaState,
@@ -269,13 +336,11 @@ export function compactExpiredLedgerShards(arg1, arg2 = {}) {
 	} catch {
 		return Object.freeze({
 			removedShards: Object.freeze([]),
-			compactedShards: Object.freeze([]),
 			retainedShards: Object.freeze([]),
 		});
 	}
 
 	const removedShards = [];
-	const compactedShards = [];
 	const retainedShards = [];
 
 	for (const name of entries) {
@@ -288,42 +353,19 @@ export function compactExpiredLedgerShards(arg1, arg2 = {}) {
 		}
 
 		const events = readShardEvents(shardPath);
-		const freshEvents = [];
-		const seenIds = new Set();
-
-		for (const ev of events) {
-			if (ev.recordedAt >= cutoffMs && !seenIds.has(ev.eventId)) {
-				seenIds.add(ev.eventId);
-				freshEvents.push(ev);
-			}
-		}
-
-		if (freshEvents.length === 0 && (events.length > 0 || stat.mtimeMs < cutoffMs)) {
-			fs.rmSync(shardPath, { force: true });
+		const expired =
+			events.length > 0
+				? events.every((ev) => ev.recordedAt < cutoffMs)
+				: stat.mtimeMs < cutoffMs;
+		if (expired && removeExpiredShard(shardPath, cutoffMs)) {
 			removedShards.push(shardPath);
-			continue;
-		}
-
-		if (freshEvents.length > 0 && freshEvents.length < events.length) {
-			const tmpPath = `${shardPath}.tmp.${process.pid}`;
-			const serialized = `${freshEvents.map((ev) => JSON.stringify(ev)).join("\n")}\n`;
-			try {
-				fs.writeFileSync(tmpPath, serialized, "utf8");
-				fs.renameSync(tmpPath, shardPath);
-				compactedShards.push(shardPath);
-			} catch {
-				fs.rmSync(tmpPath, { force: true });
-			}
+		} else {
 			retainedShards.push(shardPath);
-			continue;
 		}
-
-		retainedShards.push(shardPath);
 	}
 
 	return Object.freeze({
 		removedShards: Object.freeze(removedShards),
-		compactedShards: Object.freeze(compactedShards),
 		retainedShards: Object.freeze(retainedShards),
 	});
 }

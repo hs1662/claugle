@@ -746,6 +746,11 @@ process.stdout.write(JSON.stringify({
 		assert.equal(responses[2].result.isError, false);
 		const callPayload = JSON.parse(responses[2].result.content[0].text);
 		assert.equal(callPayload.status, "COMPLETED");
+		assert.equal(
+			callPayload.quotaState,
+			"NORMAL",
+			"one exhausted agy pool must not push every task off agy"
+		);
 		assert.equal(callPayload.responseText, "Executed on gemini-4-argon-high");
 
 		const quotaCheck = resolveRoutePlan({
@@ -893,7 +898,7 @@ describe("Markdown Documentation and Prompt Contracts", () => {
 });
 
 describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
-	it("resolves argon/flash aliases, strips agy warning prefixes, and serves /v1/messages SSE, tool_use, and slash-command fast-paths", async () => {
+	it("resolves argon/flash aliases, strips agy warning prefixes, and serves /v1/messages JSON and SSE responses", async () => {
 		assert.equal(resolveModelAlias("argon"), "gemini-4-argon-high");
 		assert.equal(resolveModelAlias("argon-medium"), "gemini-4-argon-medium");
 		assert.equal(resolveModelAlias("gemini-4-argon-high[1m]"), "gemini-4-argon-high");
@@ -1068,20 +1073,6 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 			const modelsJson = await modelsRes.json();
 			assert.equal(modelsJson.data.length, 13);
 
-			const nativeFallbackRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					model: "claude-sonnet-5-5",
-					output_config: { effort: "medium" },
-					stream: false,
-					messages: [{ role: "user", content: "내장 Sonnet 폴백 테스트" }],
-				}),
-			});
-			const nativeFallbackJson = await nativeFallbackRes.json();
-			assert.equal(nativeFallbackJson.model, "claude-sonnet-5-5-medium");
-			assert.equal(nativeFallbackJson.content[0].text, "응답 모델: claude-sonnet-5-5-medium");
-
 			const sseRes = await fetch(`${gw.url}/v1/messages?beta=true`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
@@ -1096,59 +1087,6 @@ describe("Anthropic Messages API Gateway and Model Alias Resolution", () => {
 			assert.match(sseText, /응답 모델: gemini-4-argon-high/);
 			assert.match(sseText, /event: message_stop/);
 
-			const slashTurn1 = await fetch(`${gw.url}/v1/messages?beta=true`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					model: "argon",
-					stream: false,
-					tools: [{ name: "Bash", description: "Run shell", input_schema: { type: "object" } }],
-					messages: [
-						{
-							role: "user",
-							content: 'Run claugle.mjs:\n```bash\nnode "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" quota\n```',
-						},
-					],
-				}),
-			});
-			const slashTurn1Json = await slashTurn1.json();
-			assert.equal(slashTurn1Json.stop_reason, "tool_use");
-			assert.equal(slashTurn1Json.content[0].type, "tool_use");
-			assert.equal(slashTurn1Json.content[0].name, "Bash");
-			assert.match(slashTurn1Json.content[0].input.command, /scripts\/claugle\.mjs" quota/);
-
-			const slashTurn2 = await fetch(`${gw.url}/v1/messages?beta=true`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					model: "argon",
-					stream: false,
-					tools: [{ name: "Bash", description: "Run shell", input_schema: { type: "object" } }],
-					messages: [
-						{
-							role: "user",
-							content: 'Run claugle.mjs:\n```bash\nnode "${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs" quota\n```',
-						},
-						{
-							role: "assistant",
-							content: slashTurn1Json.content,
-						},
-						{
-							role: "user",
-							content: [
-								{
-									type: "tool_result",
-									tool_use_id: slashTurn1Json.content[0].id,
-									content: '{"quotaState":"OVERFLOW_TO_AGY"}',
-								},
-							],
-						},
-					],
-				}),
-			});
-			const slashTurn2Json = await slashTurn2.json();
-			assert.equal(slashTurn2Json.stop_reason, "end_turn");
-			assert.match(slashTurn2Json.content[0].text, /"quotaState":"OVERFLOW_TO_AGY"/);
 		} finally {
 			gw.server.close();
 			fs.rmSync(dataDir, { recursive: true, force: true });

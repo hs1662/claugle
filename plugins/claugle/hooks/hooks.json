@@ -1,5 +1,5 @@
 {
-	"description": "Initialize claugle rolling quota ledger on SessionStart and emit model routing policy hints on UserPromptSubmit.",
+	"description": "Initialize claugle rolling quota ledger on SessionStart, emit model routing policy hints on UserPromptSubmit, and record native Claude Code usage from the session transcript on Stop.",
 	"hooks": {
 		"SessionStart": [
 			{
@@ -19,6 +19,17 @@
 						"type": "command",
 						"command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs\" hook",
 						"timeout": 5
+					}
+				]
+			}
+		],
+		"Stop": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/claugle.mjs\" hook",
+						"timeout": 10
 					}
 				]
 			}
