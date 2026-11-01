@@ -214,20 +214,23 @@ function namesForbidden(file, roots, forbiddenNames) {
 	const root = roots.find((r) => file === r || file.startsWith(r + path.sep));
 	return root !== undefined && path.relative(root, file).split(path.sep).some((name) => forbiddenNames.includes(name));
 }
-function allowedPath(target, roots, forbiddenNames, protectedFiles) {
+function isProtected(file, files, dirs) {
+	return files.includes(file) || dirs.some((dir) => file === dir || file.startsWith(dir + path.sep));
+}
+function allowedPath(target, roots, forbiddenNames, protectedFiles, protectedDirs) {
 	if (target.split(/[\\/]/).includes("..")) return false;
 	const resolved = resolveReal(target);
-	if (!resolved || protectedFiles.includes(resolved)) return false;
+	if (!resolved || [resolved, path.resolve(target)].some((file) => isProtected(file, protectedFiles, protectedDirs))) return false;
 	if (!roots.some((r) => resolved === r || resolved.startsWith(r + path.sep))) return false;
 	// A symlink named CLAUDE.md resolves to a file with another name, so both names are checked.
 	return !namesForbidden(resolved, roots, forbiddenNames) && !namesForbidden(path.resolve(target), roots, forbiddenNames);
 }
-function allowedTargets(args, roots, forbiddenNames, protectedFiles = []) {
+function allowedTargets(args, roots, forbiddenNames, protectedFiles = [], protectedDirs = []) {
 	try {
 		const targets = Object.entries(args || {})
 			.filter(([key, value]) => PATH_KEY.test(key) && typeof value === "string")
 			.map(([, value]) => value);
-		return targets.length > 0 && targets.every((target) => allowedPath(target, roots, forbiddenNames, protectedFiles));
+		return targets.length > 0 && targets.every((target) => allowedPath(target, roots, forbiddenNames, protectedFiles, protectedDirs));
 	} catch {
 		return false;
 	}
@@ -243,7 +246,7 @@ process.stdin.on("end", () => {
 	const allowed =
 		name === "finish" ||
 		(READ_TOOLS.has(name) && allowedTargets(call.args, CONFIG.readRoots.concat(CONFIG.writeRoots), [".git"])) ||
-		(WRITE_TOOLS.has(name) && allowedTargets(call.args, CONFIG.writeRoots, CONFIG.harnessConfigNames, CONFIG.protectedFiles));
+		(WRITE_TOOLS.has(name) && allowedTargets(call.args, CONFIG.writeRoots, CONFIG.harnessConfigNames, CONFIG.protectedFiles, CONFIG.protectedDirs));
 	process.stdout.write(JSON.stringify(allowed ? { decision: "allow" } : { decision: "deny", reason: CONFIG.denyReason }));
 });
 `;
@@ -258,13 +261,14 @@ function writeFileIfChanged(filePath, content) {
 }
 
 // agy loads PreToolUse hooks from the .agents folder of every workspace root.
-export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], protectedFiles = [], denyReason }) {
+export function writeAgyToolGate(dir, { readRoots = [], writeRoots = [], protectedFiles = [], protectedDirs = [], denyReason }) {
 	const agentsDir = path.join(dir, ".agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
 	const config = {
 		readRoots: readRoots.map((root) => fs.realpathSync(root)),
 		writeRoots: writeRoots.map((root) => fs.realpathSync(root)),
 		protectedFiles,
+		protectedDirs,
 		harnessConfigNames: HARNESS_CONFIG_NAMES,
 		denyReason,
 	};
@@ -965,7 +969,8 @@ export async function executeRoutedTask(params) {
 		writeAgyToolGate(gateDir, {
 			readRoots: [projectDir],
 			writeRoots: lease ? [projectDir] : [],
-			protectedFiles: lease ? lease.instructionFiles.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
+			protectedFiles: lease ? lease.protectedFiles.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
+			protectedDirs: lease ? lease.protectedDirs.map((rel) => path.join(fs.realpathSync(lease.worktreePath), rel)) : [],
 			denyReason: lease
 				? `claugle: only file reads and writes under ${projectDir} are allowed, never in ${HARNESS_CONFIG_NAMES.join(", ")}. Use paths under ${projectDir}.`
 				: `claugle: only file reads under ${projectDir} are allowed. This task cannot change files, run commands or use other tools.`,

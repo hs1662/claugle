@@ -109,18 +109,99 @@ reply("done");`;
 		assert.equal(fs.readFileSync(path.join(repo, "CLAUDE.md"), "utf8"), "Never run network commands.\n");
 	});
 
-	it("protects every file CLAUDE.md pulls in with @path, but not an @path inside code", async () => {
+	it("protects every file an instruction file names with @path, even inside code, and nothing else", async () => {
 		const repo = gitRepo({
-			"CLAUDE.md": "# Rules\n\n@docs/rules.md\n\n`@docs/free.md` is only an example.\n",
+			"CLAUDE.md": "# Rules\n\n@docs/rules.md\n\n`@docs/example.md` is only an example.\n",
 			"docs/rules.md": "See @more.md and @missing.md\n",
 			"docs/more.md": "Be careful.\n",
 		});
-		const agy = stubAgy(writeAndAsk(["docs/rules.md", "docs/more.md", "docs/missing.md", "docs/free.md"]));
+		const agy = stubAgy(writeAndAsk(["docs/rules.md", "docs/more.md", "docs/missing.md", "docs/example.md", "docs/free.md"]));
 		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
-		assert.deepEqual(agy.recorded(), { "docs/rules.md": "deny", "docs/more.md": "deny", "docs/missing.md": "deny", "docs/free.md": "allow" });
+		assert.deepEqual(agy.recorded(), { "docs/rules.md": "deny", "docs/more.md": "deny", "docs/missing.md": "deny", "docs/example.md": "deny", "docs/free.md": "allow" });
 		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation");
-		assert.deepEqual([...out.worktreeOutcome.violatingFiles].sort(), ["docs/missing.md", "docs/more.md", "docs/rules.md"]);
+		assert.deepEqual([...out.worktreeOutcome.violatingFiles].sort(), ["docs/example.md", "docs/missing.md", "docs/more.md", "docs/rules.md"]);
 		assert.equal(fs.readFileSync(path.join(repo, "docs/rules.md"), "utf8"), "See @more.md and @missing.md\n");
+	});
+
+	// Each case is a gap an adversarial review found in an earlier collector. The stub asks the gate about
+	// each target, then writes it anyway, so both the gate and the harvest must hold.
+	const rules = "Never run network commands.\n";
+	const cases = {
+		"an import inside a symlinked CLAUDE.md's target, relative to the target": {
+			files: { "docs/rules.md": "@more.md\n", "docs/more.md": rules },
+			links: { "CLAUDE.md": "docs/rules.md" },
+			targets: ["docs/more.md"],
+		},
+		"an import with a #fragment": { files: { "CLAUDE.md": "@docs/rules.md#setup\n", "docs/rules.md": rules }, targets: ["docs/rules.md"] },
+		"an import with an escaped space": { files: { "CLAUDE.md": "@docs/team\\ rules.md\n", "docs/team rules.md": rules }, targets: ["docs/team rules.md"] },
+		"an import in bold": { files: { "CLAUDE.md": "- Always follow **@docs/rules.md**\n", "docs/rules.md": rules }, targets: ["docs/rules.md"] },
+		"an import as link text": { files: { "CLAUDE.md": "See [@docs/rules.md](docs/rules.md).\n", "docs/rules.md": rules }, targets: ["docs/rules.md"] },
+		"an import between two literal ``` in prose": {
+			files: { "CLAUDE.md": "Wrap code in ``` fences.\n\n@docs/rules.md\n\nClose each fence with ``` alone.\n", "docs/rules.md": rules },
+			targets: ["docs/rules.md"],
+		},
+		"an absolute import into the repo": { files: { "docs/rules.md": rules }, host: (repo) => ({ "CLAUDE.md": `@${repo}/docs/rules.md\n` }), commitHost: true, targets: ["docs/rules.md"] },
+		"an import in a gitignored CLAUDE.local.md": {
+			files: { ".gitignore": "CLAUDE.local.md\n", "docs/rules.md": rules },
+			host: () => ({ "CLAUDE.local.md": "@docs/rules.md\n" }),
+			targets: ["docs/rules.md"],
+		},
+		"an import the user added to CLAUDE.md without committing": { files: { "CLAUDE.md": "# Rules\n" }, host: () => ({ "CLAUDE.md": "@docs/new-rules.md\n" }), targets: ["docs/new-rules.md"] },
+		"an import in an untracked CLAUDE.md": { files: { "docs/rules.md": rules }, host: () => ({ "CLAUDE.md": "@docs/rules.md\n" }), targets: ["docs/rules.md"] },
+		"an import in .claude/rules": { files: { ".claude/rules/security.md": "@../../docs/policy.md\n", "docs/policy.md": rules }, targets: ["docs/policy.md"] },
+		"the target of a symlinked .claude/rules file": { files: { "docs/style.md": rules }, links: { ".claude/rules/style.md": "../../docs/style.md" }, targets: ["docs/style.md"] },
+		"the target of an absolute CLAUDE.md symlink into the repo": { files: { "docs/rules.md": rules }, links: { "CLAUDE.md": (repo) => `${repo}/docs/rules.md` }, targets: ["docs/rules.md"] },
+		"a missing import target behind a folder symlink": {
+			files: { "CLAUDE.md": "@docs/new.md\n", "real-docs/index.md": "x\n" },
+			links: { docs: "real-docs" },
+			targets: ["docs/new.md", "real-docs/new.md"],
+		},
+		"the middle link of a symlink chain": { files: { "docs/b.md": rules }, links: { "CLAUDE.md": "notes/a.md", "notes/a.md": "../docs/b.md" }, targets: ["notes/a.md"] },
+		"the folder a symlinked .claude points to": {
+			files: { "config/claude/settings.json": "{}\n" },
+			links: { ".claude": "config/claude" },
+			targets: ["config/claude/settings.json", "config/claude/rules/evil.md"],
+		},
+	};
+	const askThenWrite = (targets) => `
+const gate = path.join(addDirs[0], ".agents");
+const ask = (rel) => JSON.parse(cp.execFileSync(process.execPath, ["tool-gate.cjs"], { cwd: gate, input: JSON.stringify({ toolCall: { name: "write_to_file", args: { TargetFile: path.join(process.cwd(), rel), CodeContent: "x" } } }) })).decision;
+record(Object.fromEntries(${JSON.stringify(targets)}.map((rel) => [rel, ask(rel)])));
+for (const rel of ${JSON.stringify(targets)}) {
+	if (fs.lstatSync(rel, { throwIfNoEntry: false })?.isSymbolicLink()) fs.rmSync(rel);
+	fs.mkdirSync(path.dirname(rel), { recursive: true });
+	fs.writeFileSync(rel, "PLANTED\\n");
+}
+reply("done");`;
+	const read = (file) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null);
+	for (const [name, c] of Object.entries(cases)) {
+		it(`protects ${name}`, async () => {
+			const repo = gitRepo(c.files);
+			for (const [rel, target] of Object.entries(c.links ?? {})) {
+				fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+				fs.symlinkSync(typeof target === "function" ? target(repo) : target, path.join(repo, rel));
+			}
+			if (c.links) commit(repo);
+			for (const [rel, body] of Object.entries(c.host?.(repo) ?? {})) fs.writeFileSync(path.join(repo, rel), body);
+			if (c.commitHost) commit(repo);
+			const before = c.targets.map((rel) => read(path.join(repo, rel)));
+			const agy = stubAgy(askThenWrite(c.targets));
+			const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy the docs", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+			assert.deepEqual(agy.recorded(), Object.fromEntries(c.targets.map((rel) => [rel, "deny"])));
+			assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
+			assert.deepEqual(c.targets.map((rel) => read(path.join(repo, rel))), before);
+		});
+	}
+
+	it("an edit run in a repo whose file list passes 1 MiB still applies and leaves no worktree", async () => {
+		const deep = `${"d".repeat(120)}/${"e".repeat(120)}`;
+		const repo = gitRepo(Object.fromEntries(Array.from({ length: 4500 }, (_, i) => [`${deep}/f${i}.txt`, ""])));
+		const agy = stubAgy(`fs.writeFileSync("notes.txt", "hi\\n"); reply("done");`);
+		const env = envFor(repo, agy.file);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "add notes", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env });
+		assert.equal(out.worktreeOutcome?.kind, "applied-to-host", JSON.stringify(out.errors ?? out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, "notes.txt"), "utf8"), "hi\n");
+		assert.deepEqual(fs.readdirSync(path.join(env.pluginDataDir, "worktrees")), []);
 	});
 });
 

@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { HARNESS_CONFIG_NAMES, HARNESS_INSTRUCTION_FILES, createTaskExecutionId, isSafeTaskId, parseAbsolutePath, parseRelativeGlob } from "./policy-engine.mjs";
 
@@ -12,6 +13,7 @@ function runGit(repoDir, args, options = {}) {
 		encoding: options.encoding ?? "utf8",
 		input: options.input,
 		stdio: ["pipe", "pipe", "pipe"],
+		maxBuffer: 256 * 1024 * 1024,
 	});
 }
 
@@ -96,43 +98,125 @@ export function abortWorktreeLease(lease) {
 	forceCleanupWorktree(lease.hostRepoRoot, lease.worktreePath);
 }
 
-// Claude Code and agy read each instruction file, the file a symlinked one points to, and the files
-// CLAUDE.md pulls in with `@path` (five hops at most, never inside code). An edit run must leave all of
-// them as they were, including import targets that do not exist yet. Paths are relative to the
-// worktree root, as git prints them.
+// An edit run must leave every file Claude Code or agy reads as instructions as it was, and the folder a
+// symlinked harness config folder points to. Mirroring Claude Code's loader exactly kept leaving gaps in
+// review, so this reads more than Claude Code does: every `@` token anywhere, code included, under
+// several readings, in the host working tree that Claude Code reads (not HEAD), through every symlink hop.
+// Paths are relative to the repo root, as git prints them.
 const MAX_IMPORT_HOPS = 5;
-const IMPORT = /(?:^|\s)@((?!~)[^\s`]+)/g;
+const MAX_SCANNED_BYTES = 1024 * 1024;
+const AT_TOKEN = /@((?:\\.|[^\s\\])+)/g;
+const SURFACE_PATHSPECS = [
+	...HARNESS_INSTRUCTION_FILES.map((name) => `:(glob,icase)**/${name}`),
+	...HARNESS_CONFIG_NAMES.flatMap((name) => [`:(glob)**/${name}`, `:(glob)**/${name}/**`]),
+	":(exclude,glob)**/.claude/worktrees/**",
+];
 
-function collectInstructionFiles(worktreePath) {
-	const root = fs.realpathSync(worktreePath);
-	const found = new Set();
-	const inside = (abs) => {
-		const rel = path.relative(root, abs);
-		return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : null;
+function importReadings(token) {
+	const readings = new Set();
+	for (const cut of [token, token.split("#")[0]]) {
+		for (const text of [cut, cut.replace(/\\(.)/g, "$1")]) {
+			for (const head of [text, text.split(/[)\]>"'`*]/)[0]]) {
+				readings.add(head);
+				readings.add(head.replace(/^[(<["'`*_]+/, "").replace(/[*_)\]}>`'".,;:!?]+$/, ""));
+			}
+		}
+	}
+	readings.delete("");
+	return readings;
+}
+
+function resolveExisting(abs) {
+	const rest = [];
+	for (let probe = abs; ; probe = path.dirname(probe)) {
+		try {
+			return path.join(fs.realpathSync(probe), ...rest);
+		} catch {
+			if (path.dirname(probe) === probe) return abs;
+			rest.unshift(path.basename(probe));
+		}
+	}
+}
+
+function linkChain(abs) {
+	const hops = [abs];
+	try {
+		for (let p = abs; hops.length < 40 && fs.lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink(); ) {
+			p = path.resolve(resolveExisting(path.dirname(p)), fs.readlinkSync(p));
+			hops.push(p);
+		}
+	} catch {}
+	return [...hops, ...hops.map(resolveExisting)];
+}
+
+function markdownUnder(dir) {
+	try {
+		return fs.readdirSync(dir, { recursive: true }).filter((name) => name.endsWith(".md")).slice(0, 2000).map((name) => path.join(dir, name));
+	} catch {
+		return [];
+	}
+}
+
+function collectHarnessSurface(hostRepoRoot) {
+	const roots = [...new Set([hostRepoRoot, fs.realpathSync(hostRepoRoot)])];
+	const relOf = (abs) => {
+		for (const root of roots) {
+			const rel = path.relative(root, abs);
+			if (rel && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) return rel.split(path.sep).join("/");
+		}
+		return null;
 	};
-	const visit = (rel, hops) => {
-		if (found.has(rel)) return;
-		found.add(rel);
+	const files = new Set();
+	const dirs = new Set();
+	const fewestHops = new Map();
+	const visit = (abs, hops) => {
+		if (fewestHops.get(abs) <= hops) return;
+		fewestHops.set(abs, hops);
+		const chain = linkChain(abs);
+		for (const rel of chain.map(relOf)) if (rel) files.add(rel);
+		const real = chain.at(-1);
 		let text;
 		try {
-			const real = fs.realpathSync(path.join(root, rel));
-			const realRel = inside(real);
-			if (!realRel) return;
-			found.add(realRel);
+			if (fs.statSync(real).size > MAX_SCANNED_BYTES) return;
 			text = fs.readFileSync(real, "utf8");
 		} catch {
 			return;
 		}
 		if (hops >= MAX_IMPORT_HOPS) return;
-		const prose = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "");
-		for (const [, target] of prose.matchAll(IMPORT)) {
-			const next = inside(path.resolve(path.dirname(path.join(root, rel)), target.replace(/[.,;:)]+$/, "")));
-			if (next) visit(next, hops + 1);
+		for (const [, token] of text.matchAll(AT_TOKEN)) {
+			for (const reading of importReadings(token)) {
+				if (reading.startsWith("~/")) visit(path.join(os.homedir(), reading.slice(2)), hops + 1);
+				else if (path.isAbsolute(reading)) visit(path.resolve(reading), hops + 1);
+				else for (const base of new Set([path.dirname(abs), path.dirname(real)])) visit(path.resolve(base, reading), hops + 1);
+			}
 		}
 	};
-	const tracked = runGit(root, ["ls-files", "-z"]).split("\0").filter(Boolean);
-	for (const rel of tracked) if (HARNESS_INSTRUCTION_FILES.includes(path.posix.basename(rel))) visit(rel, 0);
-	return found;
+
+	const instructionName = (rel) => HARNESS_INSTRUCTION_FILES.some((name) => name.toLowerCase() === path.posix.basename(rel).toLowerCase());
+	const listed = runGit(hostRepoRoot, ["ls-files", "-z", "--cached", "--others", "--", ...SURFACE_PATHSPECS]).split("\0").filter(Boolean);
+	for (const rel of listed) {
+		const abs = path.join(hostRepoRoot, rel);
+		if (instructionName(rel) || (rel.split("/").includes(".claude") && rel.endsWith(".md"))) visit(abs, 0);
+		if (!HARNESS_CONFIG_NAMES.includes(path.posix.basename(rel)) || !fs.lstatSync(abs, { throwIfNoEntry: false })?.isSymbolicLink()) continue;
+		const target = resolveExisting(abs);
+		const targetRel = relOf(target);
+		if (targetRel) dirs.add(targetRel);
+		if (path.posix.basename(rel) === ".claude") for (const md of markdownUnder(target)) visit(md, 0);
+	}
+	const outside = ["/etc/claude-code/CLAUDE.md", path.join(os.homedir(), ".gemini", "GEMINI.md")];
+	for (const top of [...roots.map(path.dirname), os.homedir()]) {
+		for (let dir = top; ; dir = path.dirname(dir)) {
+			outside.push(...["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", ".claude/CLAUDE.md"].map((name) => path.join(dir, name)));
+			outside.push(...markdownUnder(path.join(dir, ".claude", "rules")));
+			if (path.dirname(dir) === dir) break;
+		}
+	}
+	for (const abs of outside) visit(abs, 0);
+	return { files: [...files], dirs: [...dirs] };
+}
+
+function isProtected(file, { protectedFiles, protectedDirs }) {
+	return protectedFiles.includes(file) || protectedDirs.some((dir) => file === dir || file.startsWith(`${dir}/`));
 }
 
 export function acquireWorktreeLease(params) {
@@ -188,6 +272,7 @@ export function acquireWorktreeLease(params) {
 		forceCleanupWorktree(hostRepoRoot, worktreePath);
 	}
 
+	const surface = collectHarnessSurface(hostRepoRoot);
 	runGit(hostRepoRoot, ["worktree", "add", "--detach", worktreePath, baseCommitSha]);
 	const gitDir = runGit(worktreePath, ["rev-parse", "--absolute-git-dir"]).trim();
 	const executionCwd = path.join(worktreePath, cwdPrefix);
@@ -205,7 +290,8 @@ export function acquireWorktreeLease(params) {
 		baseCommitSha,
 		branchName,
 		allowedGlobs: Object.freeze(allowedGlobs),
-		instructionFiles: Object.freeze([...collectInstructionFiles(worktreePath)]),
+		protectedFiles: Object.freeze(surface.files),
+		protectedDirs: Object.freeze(surface.dirs),
 		applyStrategy,
 		createdAt,
 	});
@@ -279,7 +365,7 @@ export function harvestAndReleaseWorktree(arg) {
 
 		const violatingFiles = modifiedFiles.filter(
 			(file, i) =>
-				lease.instructionFiles.includes(changedFiles[i]) ||
+				isProtected(changedFiles[i], lease) ||
 				file.split("/").some((name) => HARNESS_CONFIG_NAMES.includes(name)) ||
 				!matchesAllowedGlobs(file, lease.allowedGlobs)
 		);
