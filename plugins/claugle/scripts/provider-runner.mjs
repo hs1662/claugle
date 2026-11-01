@@ -631,6 +631,8 @@ export function runHeadlessProvider(params) {
 					// agy takes its workspace root from PWD, so it must name the folder claugle checked.
 					PWD: cwd,
 					...(provider === "agy" && params.agyHome ? { HOME: params.agyHome } : {}),
+					// agy --bg-updater could replace the binary the isolation was checked against. Only "true" turns it off; "1" does not.
+					...(provider === "agy" ? { AGY_CLI_DISABLE_AUTO_UPDATE: "true" } : {}),
 				},
 				stdio: [provider === "gemini-cli" ? "ignore" : "pipe", "pipe", "pipe"],
 				detached: true,

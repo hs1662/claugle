@@ -376,6 +376,13 @@ reply("done");`);
 		assert.equal(seen.pwd, seen.cwd);
 	});
 
+	it("agy runs with its self-updater off", async () => {
+		const repo = gitRepo();
+		const agy = stubAgy(`record({ autoUpdate: process.env.AGY_CLI_DISABLE_AUTO_UPDATE ?? null }); reply("done");`);
+		await executeRoutedTask({ request: parseTaskRequest({ prompt: "Review this diff", explicitTaskKind: "review", cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.deepEqual(agy.recorded(), { autoUpdate: "true" });
+	});
+
 	it("an inherited GIT_DIR does not stop the gate folder from becoming its own repo", () => {
 		const outer = gitRepo({ ".agents/skills/s/SKILL.md": "x\n" });
 		const repo = gitRepo();
