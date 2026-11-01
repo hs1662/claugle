@@ -244,6 +244,55 @@ reply("done");`;
 			files: { ".Claude/settings.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "sh scripts/hook.sh" }] }] } }), "scripts/hook.sh": "\n" },
 			targets: ["scripts/hook.sh"],
 		},
+		"the scripts hooks name by a bare folder or module, through another variable's default, $PWD or the settings env": {
+			files: {
+				".claude/settings.json": JSON.stringify({
+					env: { HOOKS: "tools/hooks" },
+					hooks: {
+						Stop: [
+							{
+								hooks: [
+									"cd tools && sh ./check.sh",
+									"uv --directory hooks run guard.py",
+									"python3 -m guard",
+									"node server",
+									"PYTHONPATH=lib python3 -m lint",
+									"sh ${HOOK_DIR:-scripts}/guard.sh",
+									"sh $PWD/bin/stop.sh",
+									'sh "$HOOKS/env.sh"',
+								].map((command) => ({ type: "command", command })),
+							},
+						],
+					},
+				}),
+				"tools/check.sh": "\n",
+				"hooks/guard.py": "\n",
+				"guard.py": "\n",
+				"server.js": "\n",
+				"lib/lint.py": "\n",
+				"scripts/guard.sh": "\n",
+				"bin/stop.sh": "\n",
+				"tools/hooks/env.sh": "\n",
+			},
+			targets: ["tools/check.sh", "hooks/guard.py", "guard.py", "server.js", "lib/lint.py", "scripts/guard.sh", "bin/stop.sh", "tools/hooks/env.sh"],
+		},
+		"hooks in agent and skill frontmatter, a fenced ! block, and a command's @ reference from the project folder": {
+			files: {
+				".claude/agents/db.md": "---\nname: db\nhooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks:\n        - type: command\n          command: ./scripts/validate.sh\n---\nRead only.\n",
+				".claude/skills/deploy/SKILL.md": "---\nname: deploy\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: python3 scripts/deploy-guard.py\n---\n```!\nsh scripts/env-summary.sh\n```\n",
+				".claude/commands/ctx.md": "Follow @docs/conventions.md\n",
+				"scripts/validate.sh": "\n",
+				"scripts/deploy-guard.py": "\n",
+				"scripts/env-summary.sh": "\n",
+				"docs/conventions.md": rules,
+			},
+			targets: ["scripts/validate.sh", "scripts/deploy-guard.py", "scripts/env-summary.sh", "docs/conventions.md"],
+		},
+		"links one level below a symlinked .claude": {
+			files: { "real/settings.json": "{}\n", "shared/rules/a.md": rules, "cfg/keep.md": "x\n" },
+			links: { ".claude": "cfg", "cfg/settings.json": "../real/settings.json", "cfg/rules": "../shared/rules" },
+			targets: ["real/settings.json", "shared/rules/planted.md"],
+		},
 		"a missing import target whose folder the run plants as a symlink": {
 			files: { "CLAUDE.md": "@docs/rules.md\n" },
 			targets: ["docs/rules.md"],
@@ -329,7 +378,7 @@ reply("done");`;
 		fs.symlinkSync(path.join(repo, "bin/claude-ctx"), path.join(home, "pbin/claude-ctx"));
 		fs.mkdirSync(path.join(home, ".claude/commands/ops"), { recursive: true });
 		fs.symlinkSync(path.join(repo, "claude/commands/ops/release.md"), path.join(home, ".claude/commands/ops/release.md"));
-		const commands = ["sh ~/bin/guard.sh", "sh $HOME/dotfiles/hooks/ctx.sh", "claude-ctx"];
+		const commands = ["sh ~/bin/guard.sh", "sh $HOME/dotfiles/hooks/ctx.sh", "timeout 5 claude-ctx"];
 		fs.writeFileSync(path.join(home, ".claude/settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: commands.map((command) => ({ type: "command", command })) }] } }));
 		const targets = ["bin/guard.sh", "hooks/ctx.sh", "bin/claude-ctx", "claude/commands/ops/release.md"];
 		const agy = stubAgy(askThenWrite(targets));
@@ -372,6 +421,41 @@ reply("done");`;
 		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
 		assert.equal(out.status, "DELEGATE_TO_HOST");
 		assert.equal(agy.started(), false);
+	});
+
+	it("a hook that names the project folder itself leaves the package entry free to edit", async () => {
+		const hooks = ['"$CLAUDE_PROJECT_DIR"/.claude/hooks/fmt.sh', "npx eslint --fix .", "ruff check . && pytest"].map((command) => ({ type: "command", command }));
+		const repo = gitRepo({
+			".claude/settings.json": JSON.stringify({ hooks: { PostToolUse: [{ hooks }] } }),
+			".claude/hooks/fmt.sh": "\n",
+			"package.json": JSON.stringify({ main: "src/index.js" }),
+			"src/index.js": "\n",
+		});
+		const agy = stubAgy(`fs.writeFileSync("package.json", "{}\\n"); fs.writeFileSync("src/index.js", "x\\n"); reply("done");`);
+		const out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "edit", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		assert.equal(out.worktreeOutcome?.kind, "applied-to-host", JSON.stringify(out.worktreeOutcome));
+		assert.equal(fs.readFileSync(path.join(repo, "src/index.js"), "utf8"), "x\n");
+	});
+
+	it("protects the scripts ! lines in user-level commands and skills run, and the files they name with @", async () => {
+		const repo = gitRepo({ "tools/ctx.py": "\n", "tools/deploy.sh": "\n", "docs/conventions.md": "x\n" });
+		const home = tmp("claugle-iso-home-");
+		fs.mkdirSync(path.join(home, ".claude/commands"), { recursive: true });
+		fs.mkdirSync(path.join(home, ".claude/skills/deploy"), { recursive: true });
+		fs.writeFileSync(path.join(home, ".claude/commands/ctx.md"), `!\`python3 ${repo}/tools/ctx.py\`\nFollow @docs/conventions.md\n`);
+		fs.writeFileSync(path.join(home, ".claude/skills/deploy/SKILL.md"), `!\`sh ${repo}/tools/deploy.sh\`\n`);
+		const targets = ["tools/ctx.py", "tools/deploy.sh", "docs/conventions.md"];
+		const agy = stubAgy(askThenWrite(targets));
+		const savedHome = process.env.HOME;
+		process.env.HOME = home;
+		let out;
+		try {
+			out = await executeRoutedTask({ request: parseTaskRequest({ prompt: "tidy", explicitTaskKind: "docs", allowFileEdits: true, cwd: repo }).value, env: envFor(repo, agy.file) });
+		} finally {
+			process.env.HOME = savedHome;
+		}
+		assert.deepEqual(agy.recorded(), Object.fromEntries(targets.map((rel) => [rel, "deny"])));
+		assert.equal(out.worktreeOutcome?.kind, "rejected-glob-violation", JSON.stringify(out.worktreeOutcome));
 	});
 
 	it("one very long @ token does not stall the edit run", async () => {

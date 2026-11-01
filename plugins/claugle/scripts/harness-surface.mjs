@@ -7,8 +7,8 @@ import { HARNESS_CONFIG_NAMES, HARNESS_INSTRUCTION_FILES } from "./policy-engine
 // instructions, every hop of a symlink inside a project or user harness folder, and every script a
 // harness config names. Mirroring Claude Code's loader and the shell exactly kept leaving gaps in
 // review, so this reads more than they do: every `@` token anywhere, code included, under several
-// readings; every path-like token in a harness config or a `!` command line, under the spellings a
-// shell or interpreter accepts; in the host working tree that Claude Code reads, not HEAD. Not followed:
+// readings; every word in a harness config, a `!` command line or a frontmatter hook, under the
+// spellings a shell or interpreter accepts; in the host working tree that Claude Code reads, not HEAD. Not followed:
 // `npm run` or `make` targets, and files a named script loads in turn. Paths are relative to the repo
 // root, as git prints them.
 
@@ -17,9 +17,13 @@ const MAX_SCANNED_BYTES = 8 * 1024 * 1024;
 const PATH_MAX = 4096;
 const AT_TOKEN = /@((?:\\.|[^\s\\])+)/g;
 const COMMAND_TOKEN = /[^\s"'`;|&<>(){}[\],=]+/g;
-const BANG_COMMAND = /!`([^`]+)`/g;
+const BANG_COMMAND = /!`([^`]+)`|^\s*```!\s*$([\s\S]*?)^\s*```/gm;
+// Agent, skill and command frontmatter can declare hooks.
+const FRONTMATTER = /^---\s*\n([\s\S]*?)\n---\s*$/m;
 const SCRIPT_SUFFIXES = [".js", ".mjs", ".cjs", ".ts", ".py", ".sh"];
 const SCRIPT_ENTRIES = ["index.js", "package.json", "__main__.py", "__init__.py"];
+// After these, a folder name runs the folder's entry file.
+const RUNS_A_FOLDER = /^(?:node|nodejs|deno|bun|tsx|ts-node|python[\d.]*|py|pypy[\d.]*|-m)$/;
 const MANAGED_DIRS = ["/etc/claude-code", "/Library/Application Support/ClaudeCode"];
 // Symlinks in a user-level harness folder can point into the repo, as in a dotfiles repo. The first two
 // hold large caches, so only their direct entries are checked.
@@ -51,12 +55,17 @@ function importReadings(token) {
 	return readings;
 }
 
-function expandCommand(text, projectDir, home) {
-	return text
-		.replace(/\$\{CLAUDE_PROJECT_DIR(?::?-[^}]*)?\}|\$CLAUDE_PROJECT_DIR\b/g, projectDir)
-		.replace(/\$\{HOME(?::?-[^}]*)?\}|\$HOME\b/g, home)
-		.replaceAll('\\"', "");
+// Both readings of `${NAME:-default}`: the value the variable has, and the default.
+function expandCommand(text, vars) {
+	const expand = (preferDefault) =>
+		text
+			.replace(/\$\{(\w+)(?::?[-=+?]([^}]*))?\}/g, (_, name, fallback) => (preferDefault && fallback !== undefined ? fallback : (vars[name] ?? fallback ?? "")))
+			.replace(/\$(\w+)/g, (_, name) => vars[name] ?? "")
+			.replaceAll('\\"', "");
+	return [...new Set([expand(false), expand(true)])];
 }
+
+const stringValues = (value) => (value && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v === "string")) : {});
 
 function jsonStrings(value, out = []) {
 	if (typeof value === "string") out.push(value);
@@ -69,7 +78,7 @@ function jsonStrings(value, out = []) {
 function commandStrings(file, text) {
 	try {
 		const parsed = JSON.parse(text);
-		if (path.basename(file) !== ".claude.json") return jsonStrings(parsed);
+		if (path.basename(file) !== ".claude.json") return jsonStrings({ ...parsed, permissions: undefined });
 		const servers = [];
 		const walk = (value) => {
 			if (value && typeof value === "object") for (const [key, child] of Object.entries(value)) key === "mcpServers" ? servers.push(child) : walk(child);
@@ -167,10 +176,11 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 		);
 		for (const entry of named) protectExisting(path.resolve(path.dirname(manifestPath), entry));
 	};
-	const protectScript = (candidate) => {
+	const protectScript = (candidate, runsFolder) => {
 		if (candidate.length > PATH_MAX) return;
 		if (relOf(candidate)) protectChain(candidate, files);
 		protectExisting(candidate);
+		if (!runsFolder || projectDirs.includes(candidate)) return;
 		for (const entry of SCRIPT_ENTRIES) {
 			const spelling = path.join(candidate, entry);
 			if (!exists(spelling)) continue;
@@ -179,11 +189,32 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 		}
 	};
 	const pathDirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+	const envOf = (file) => {
+		try {
+			return stringValues(JSON.parse(fs.readFileSync(file, "utf8"))?.env);
+		} catch {
+			return {};
+		}
+	};
+	const userEnv = Object.assign({}, ...["settings.json", "settings.local.json"].map((name) => envOf(path.join(claudeDir, name))));
+	// Every word counts, not only words that look like paths: `cd tools`, `python3 -m guard` and
+	// `node server` name a file or folder by a bare word.
 	const scanCommands = (commands, configFile) => {
 		for (const projectDir of projectsOf(configFile)) {
-			const expanded = commands.map((command) => expandCommand(command, projectDir, home));
-			const tokens = expanded.flatMap((command) => [...command.matchAll(COMMAND_TOKEN)].map(([token]) => token)).filter((token) => token.length <= PATH_MAX && /[/.]/.test(token));
-			const programs = expanded.flatMap((command) => command.split(/&&|\|\||[;|]/).map((part) => part.trim().split(/\s+/)[0])).filter((word) => /^[\w.+-]+$/.test(word));
+			const vars = {
+				...process.env,
+				...userEnv,
+				...Object.assign({}, ...["settings.json", "settings.local.json"].map((name) => envOf(path.join(projectDir, ".claude", name)))),
+				...envOf(configFile),
+				HOME: home,
+				PWD: projectDir,
+				CLAUDE_PROJECT_DIR: projectDir,
+			};
+			const expanded = commands.flatMap((command) => expandCommand(command, vars));
+			const words = expanded.flatMap((command) => [...command.matchAll(COMMAND_TOKEN)].map(([token]) => token)).filter((token) => token.length <= PATH_MAX);
+			const tokens = words.map((token, i) => ({ token, runsFolder: i > 0 && RUNS_A_FOLDER.test(path.basename(words[i - 1])) }));
+			// Any word can be the program: `timeout 5 x`, `FOO=1 x`, `env x`.
+			const programs = [...new Set(words)].filter((word) => /^[\w.+-]+$/.test(word));
 			const bases = new Set([projectDir, ...roots, path.dirname(configFile), path.dirname(resolveExisting(configFile))]);
 			const pathsOf = (token) => {
 				const readings = /^[\w.]+$/.test(token) && token.includes(".") ? [token, token.replaceAll(".", "/")] : [token];
@@ -193,9 +224,13 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 					return [...bases].map((base) => path.resolve(base, reading));
 				});
 			};
-			// `cd D && ./f`, `--directory D f` and the like run f from D.
-			for (const token of tokens) for (const candidate of pathsOf(token)) if (relOf(candidate) && isDir(candidate)) bases.add(candidate);
-			for (const token of tokens) for (const candidate of pathsOf(token)) protectScript(candidate);
+			// `cd D && ./f`, `--directory D f`, `PYTHONPATH=D` and the like run f from D, also when D reaches
+			// the repo through a link.
+			for (let round = 0, before = -1; round < 3 && bases.size !== before; round++) {
+				before = bases.size;
+				for (const { token } of tokens) for (const candidate of pathsOf(token)) if (isDir(candidate) && (relOf(candidate) || relOf(resolveExisting(candidate)))) bases.add(candidate);
+			}
+			for (const { token, runsFolder } of tokens) for (const candidate of pathsOf(token)) protectScript(candidate, runsFolder);
 			for (const program of programs) for (const dir of pathDirs) if (exists(path.join(dir, program))) protectChain(path.join(dir, program), files);
 		}
 	};
@@ -212,6 +247,15 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 		scanCommands(commandStrings(abs, text), abs);
 	};
 
+	const scanBangText = (text, abs) => {
+		const commands = [...text.matchAll(BANG_COMMAND)].map(([, inline, fenced]) => inline ?? fenced);
+		const frontmatter = text.startsWith("---") ? text.match(FRONTMATTER)?.[1] : undefined;
+		if (frontmatter && /^\s*hooks\s*:/m.test(frontmatter)) commands.push(frontmatter);
+		if (commands.length > 0) scanCommands(commands, abs);
+	};
+
+	// A command, skill or agent reads `@path` from the folder Claude Code runs in.
+	const invokedFromProject = (abs) => abs.split(path.sep).some((part) => ["commands", "skills", "agents"].includes(foldName(part)));
 	const fewestHops = new Map();
 	const visit = (abs, hops) => {
 		if (abs.length > PATH_MAX || fewestHops.get(abs) <= hops) return;
@@ -230,14 +274,13 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 		} catch {
 			return;
 		}
-		const bangCommands = [...text.matchAll(BANG_COMMAND)].map(([, command]) => command);
-		if (bangCommands.length > 0) scanCommands(bangCommands, abs);
+		scanBangText(text, abs);
 		if (hops >= MAX_IMPORT_HOPS) return;
 		for (const [, token] of text.matchAll(AT_TOKEN)) {
 			for (const reading of importReadings(token)) {
 				if (reading.startsWith("~/")) visit(path.join(home, reading.slice(2)), hops + 1);
 				else if (path.isAbsolute(reading)) visit(path.resolve(reading), hops + 1);
-				else for (const base of new Set([path.dirname(abs), path.dirname(real)])) visit(path.resolve(base, reading), hops + 1);
+				else for (const base of new Set([path.dirname(abs), path.dirname(real), ...(invokedFromProject(abs) ? projectDirs : [])])) visit(path.resolve(base, reading), hops + 1);
 			}
 		}
 	};
@@ -246,10 +289,16 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 		if (name.endsWith(".md")) visit(file, 0);
 		if (name.endsWith(".json")) scanConfig(file);
 	};
+	const followed = new Set();
 	const followLink = (abs) => {
 		protectChain(abs, dirs);
 		const target = resolveExisting(abs);
-		for (const file of isDir(target) ? filesUnder(target) : [target]) read(file);
+		if (followed.has(target)) return;
+		followed.add(target);
+		for (const file of isDir(target) ? filesUnder(target) : [target]) {
+			read(file);
+			if (file !== target && isLink(file)) followLink(file);
+		}
 	};
 
 	for (const rel of listed) {
@@ -293,7 +342,10 @@ export function collectHarnessSurface({ hostRepoRoot, listed, sessionProjectDir 
 			}),
 			...USER_HARNESS_DEEP.flatMap((sub) => [path.join(harnessDir, sub), ...filesUnder(path.join(harnessDir, sub))]),
 		];
-		for (const entry of entries) if (isLink(entry)) followLink(entry);
+		for (const entry of entries) {
+			if (isLink(entry)) followLink(entry);
+			else if (foldName(entry).endsWith(".md")) visit(entry, 0);
+		}
 	}
 	return { files: [...files], dirs: [...dirs] };
 }
